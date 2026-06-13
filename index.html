@@ -10,6 +10,7 @@
   canvas{display:block;}
   #crosshair{position:fixed;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:50%;
     background:rgba(255,255,255,0.35);pointer-events:none;display:none;}
+  #fade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9;}
   #overlay{position:fixed;inset:0;background:#000;display:flex;flex-direction:column;align-items:center;
     justify-content:center;z-index:10;cursor:pointer;transition:opacity 0.6s;}
   #overlay h1{color:#7a7268;font-size:54px;letter-spacing:18px;font-weight:normal;margin:0 0 8px 18px;}
@@ -22,6 +23,7 @@
 </head>
 <body>
 <div id="app"></div>
+<div id="fade"></div>
 <div id="crosshair"></div>
 <div id="overlay">
   <h1>P.T. SANS</h1>
@@ -1050,6 +1052,14 @@ wallText.position.set(-16.04, 1.7, -15.4);
 wallText.visible = false;
 scene.add(wallText);
 
+/* the same words, bleeding onto a hallway wall — only on the second lap */
+const loopText = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 0.85),
+  new THREE.MeshBasicMaterial({ map: wallTextTex, transparent: true }));
+loopText.rotation.y = Math.PI / 2;            // west wall of leg A, faces +x into the corridor
+loopText.position.set(-1.24, 1.7, -6.2);
+loopText.visible = false;
+scene.add(loopText);
+
 /* ============================ LISA ============================
    Mixamo "Zombiegirl W Kurniawan" + animation clips from /zombie-pack.
    The wrapper group is what the game logic positions and aims.        */
@@ -1869,6 +1879,44 @@ function updateAudioCues(now) {
   }
 }
 
+/* ============================ THE LOOP ============================
+   Walk through the dark door and the house puts you back at the start.
+   One extra lap for now: lap 0 loops, lap 1 lets you through to the scare. */
+
+let lap = 0;
+const FINAL_LAP = 1;
+let loopState = 'none';   // 'none' | 'out' (fading to black) | 'in' (fading back)
+let loopT = 0;
+const fadeEl = document.getElementById('fade');
+
+function applyLap(n) {
+  if (n >= 1) {                                          // the second pass is wrong
+    for (const L of lamps) { L.base *= 0.5; L.light.color.set(0x8ea2c4); }
+    loopText.visible = true;
+    sob();                                               // a cue that something has changed
+  }
+}
+
+function updateLoop(dt) {
+  /* trigger: stepping through the doorway on a non-final lap */
+  if (loopState === 'none' && lap < FINAL_LAP && scareState === 'armed' && px < -10.5) {
+    loopState = 'out'; loopT = 0;
+  }
+  if (loopState === 'out') {
+    loopT += dt;
+    fadeEl.style.opacity = Math.min(1, loopT / 0.3);
+    if (loopT >= 0.3) {                                  // at full black: snap home, change the house
+      px = 0; pz = -0.6; yaw = 0; pitch = 0;
+      lap++; applyLap(lap);
+      loopState = 'in'; loopT = 0;
+    }
+  } else if (loopState === 'in') {
+    loopT += dt;
+    fadeEl.style.opacity = Math.max(0, 1 - loopT / 0.8);
+    if (loopT >= 0.8) { loopState = 'none'; fadeEl.style.opacity = 0; }
+  }
+}
+
 /* ============================ MAIN LOOP ============================ */
 
 /* hidden debug hook — open the console and try __pt.scare() */
@@ -1884,6 +1932,8 @@ window.__pt = {
   },
   hideLisa: () => { lisa.visible = false; },
   step: (dt = 1 / 60, n = 1) => { for (let i = 0; i < n; i++) tick(dt); },
+  getLap: () => lap,
+  loopState: () => loopState,
   initAudio: () => initAudio(),
   sting: () => scareSting(),
   samples,
@@ -1902,6 +1952,7 @@ function tick(dt) {
   const now = simTime;
 
   if (locked) updatePlayer(dt);
+  updateLoop(dt);                        // before the scare: a non-final lap loops you home first
   updateDoor(dt, now);
   updateLights(now, dt);
   updateTease(dt, now);
