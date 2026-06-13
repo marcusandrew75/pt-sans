@@ -11,3 +11,6 @@ index.backup-*.html
 !/three-js/examples/
 /three-js/examples/*
 !/three-js/examples/jsm/
+
+# local Claude tooling (preview launch config)
+.claude/
