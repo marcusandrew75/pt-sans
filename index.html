@@ -50,6 +50,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 /* ============================ RENDERER / SCENE ============================ */
 
@@ -1010,6 +1011,19 @@ addBox(0.12, 0.15, 0.28, 1.06, 0.905, -10.18, ironMat, { cast: true });
     scene.add(b);
   }
 }
+
+/* HD prop: a dead camera on the sideboard (Poly Haven Camera_01, CC0) */
+new GLTFLoader().load('./models/Camera_01_2k.gltf/Camera_01_2k.gltf', (gltf) => {
+  const cam = gltf.scene;
+  cam.rotation.y = Math.PI / 2;                          // lens toward the corridor (tuned by eye)
+  cam.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(cam);
+  const c = box.getCenter(new THREE.Vector3());
+  cam.position.set(1.0 - c.x, 0.832 - box.min.y, -9.98 - c.z);   // rest its base on the top, centred
+  cam.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  scene.add(cam);
+  window.__cam = cam;                                    // live handle for tuning
+}, undefined, e => console.error('camera model failed:', e));
 
 /* potted plant in the leg B corner, near the dark door */
 {
