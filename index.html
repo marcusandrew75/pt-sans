@@ -1015,7 +1015,9 @@ function placeProp(file, { scale = 1, rotX = 0, rotY = 0, rotZ = 0, x, z, name }
     const box = new THREE.Box3().setFromObject(o);
     const c = box.getCenter(new THREE.Vector3());
     o.position.set(x - c.x, SIDEBOARD_TOP - box.min.y, z - c.z);
-    o.traverse(m => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
+    /* no castShadow: a 27K-tri prop in 3 point-lights' cube maps (18 passes/frame)
+       was tanking the framerate. they barely cast a visible shadow here anyway. */
+    o.traverse(m => { if (m.isMesh) { m.castShadow = false; m.receiveShadow = true; } });
     scene.add(o);
     if (name) window['__' + name] = o;                   // live handles for tuning
   }, undefined, e => console.error(file + ' failed to load:', e));
