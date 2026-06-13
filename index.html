@@ -1006,11 +1006,11 @@ addBox(0.42, 0.03, 1.22, 1.05, 0.815, -9.9, darkWood, { cast: true });
    Each rests its base on the top and centres on (x,z). */
 const SIDEBOARD_TOP = 0.832;
 const gltfLoader = new GLTFLoader();
-function placeProp(file, { scale = 1, rotY = 0, x, z, name }) {
+function placeProp(file, { scale = 1, rotX = 0, rotY = 0, rotZ = 0, x, z, name }) {
   gltfLoader.load('./models/' + file, (gltf) => {
     const o = gltf.scene;
     o.scale.setScalar(scale);
-    o.rotation.y = rotY;
+    o.rotation.set(rotX, rotY, rotZ);      // base rest below adapts to any orientation
     o.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(o);
     const c = box.getCenter(new THREE.Vector3());
@@ -1025,7 +1025,7 @@ placeProp('Camera_01_2k.gltf/Camera_01_2k.gltf',
 placeProp('brass_vase_03_2k.gltf/brass_vase_03_2k.gltf',
   { scale: 1.0, rotY: 0.4, x: 1.1, z: -10.22, name: 'vase' });
 placeProp('cassette_player_2k.gltf/cassette_player_2k.gltf',
-  { scale: 1.0, rotY: -Math.PI / 2 + 0.3, x: 1.0, z: -9.5, name: 'cass' });
+  { scale: 1.0, rotX: -Math.PI / 2, rotY: 0.35, x: 1.0, z: -9.45, name: 'cass' });
 
 /* potted plant in the leg B corner, near the dark door */
 {
