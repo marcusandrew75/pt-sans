@@ -990,7 +990,7 @@ addPicture(-3.0, -13.94, Math.PI, -0.02, photoTexture(PHOTOS.bridge), 0.42, 0.32
   scene.add(scrawl2);
 }
 
-/* sideboard with bottles and a dead radio */
+/* sideboard — real-world glTF props sit on top (loaded below) */
 addBox(0.38, 0.8, 1.15, 1.05, 0.4, -9.9, darkWood, { cast: true, solid: true });
 addBox(0.42, 0.03, 1.22, 1.05, 0.815, -9.9, darkWood, { cast: true });
 {
@@ -1001,30 +1001,31 @@ addBox(0.42, 0.03, 1.22, 1.05, 0.815, -9.9, darkWood, { cast: true });
     scene.add(kn);
   }
 }
-addBox(0.12, 0.15, 0.28, 1.06, 0.905, -10.18, ironMat, { cast: true });
-{
-  const glass = new THREE.MeshStandardMaterial({ color: 0x14271c, roughness: 0.15, metalness: 0.1 });
-  for (const [bz, bh] of [[-9.7, 0.22], [-9.6, 0.15], [-9.79, 0.18]]) {
-    const b = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, bh, 10), glass);
-    b.position.set(1.05, 0.83 + bh / 2, bz);
-    b.castShadow = true;
-    scene.add(b);
-  }
+/* HD props on the sideboard — real-world glTF assets (Poly Haven, CC0).
+   The old procedural radio + bottles are gone; these are the real thing.
+   Each rests its base on the top and centres on (x,z). */
+const SIDEBOARD_TOP = 0.832;
+const gltfLoader = new GLTFLoader();
+function placeProp(file, { scale = 1, rotY = 0, x, z, name }) {
+  gltfLoader.load('./models/' + file, (gltf) => {
+    const o = gltf.scene;
+    o.scale.setScalar(scale);
+    o.rotation.y = rotY;
+    o.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(o);
+    const c = box.getCenter(new THREE.Vector3());
+    o.position.set(x - c.x, SIDEBOARD_TOP - box.min.y, z - c.z);
+    o.traverse(m => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
+    scene.add(o);
+    if (name) window['__' + name] = o;                   // live handles for tuning
+  }, undefined, e => console.error(file + ' failed to load:', e));
 }
-
-/* HD prop: a dead camera on the sideboard (Poly Haven Camera_01, CC0) */
-new GLTFLoader().load('./models/Camera_01_2k.gltf/Camera_01_2k.gltf', (gltf) => {
-  const cam = gltf.scene;
-  cam.scale.setScalar(1.35);                             // a touch larger — more of a hero piece
-  cam.rotation.y = Math.PI / 2 + 0.32;                   // lens toward the corridor, angled naturally
-  cam.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(cam);
-  const c = box.getCenter(new THREE.Vector3());
-  cam.position.set(1.04 - c.x, 0.832 - box.min.y, -9.93 - c.z);  // rest its base on the top, nudged back
-  cam.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  scene.add(cam);
-  window.__cam = cam;                                    // live handle for tuning
-}, undefined, e => console.error('camera model failed:', e));
+placeProp('Camera_01_2k.gltf/Camera_01_2k.gltf',
+  { scale: 1.35, rotY: Math.PI / 2 + 0.32, x: 1.04, z: -9.88, name: 'cam' });
+placeProp('brass_vase_03_2k.gltf/brass_vase_03_2k.gltf',
+  { scale: 1.0, rotY: 0.4, x: 1.1, z: -10.22, name: 'vase' });
+placeProp('cassette_player_2k.gltf/cassette_player_2k.gltf',
+  { scale: 1.0, rotY: -Math.PI / 2 + 0.3, x: 1.0, z: -9.5, name: 'cass' });
 
 /* potted plant in the leg B corner, near the dark door */
 {
@@ -1296,7 +1297,7 @@ function initAudio() {
   }
   route(humGain, 0.3);
 
-  /* the dead radio murmurs, if you stand close enough to hear it */
+  /* the cassette player murmurs, if you stand close enough to hear it */
   murGain = AC.createGain(); murGain.gain.value = 0;
   const mur = noiseSource();
   const mf1 = AC.createBiquadFilter(); mf1.type = 'bandpass'; mf1.frequency.value = 520; mf1.Q.value = 4;
