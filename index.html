@@ -411,6 +411,97 @@ const scrawlTex = makeTexture(512, 128, (g, w, h) => {
   }
 });
 
+/* a bloody handprint, optionally a child's, optionally dragging downward */
+function handprintTexture({ child = false, drag = false } = {}) {
+  return makeTexture(128, 192, (g, w, h) => {
+    g.clearRect(0, 0, w, h);
+    const cx = w / 2, palmY = h * 0.40, s = child ? 0.6 : 1;
+    g.fillStyle = 'rgba(84,9,9,0.82)';                     // dried blood
+    g.beginPath(); g.ellipse(cx, palmY, 28 * s, 32 * s, 0, 0, 7); g.fill();
+    for (const fx of [-21, -7, 7, 21]) {                   // four fingers
+      g.save(); g.translate(cx + fx * s, palmY - 26 * s); g.rotate(fx * 0.013);
+      g.beginPath(); g.ellipse(0, -17 * s, 6.5 * s, 21 * s, 0, 0, 7); g.fill();
+      g.restore();
+    }
+    g.save(); g.translate(cx - 28 * s, palmY); g.rotate(-0.95);  // thumb
+    g.beginPath(); g.ellipse(0, -15 * s, 7.5 * s, 17 * s, 0, 0, 7); g.fill();
+    g.restore();
+    for (let i = 0; i < 50; i++) {                         // broken-up voids in the print
+      g.fillStyle = `rgba(18,2,2,${Math.random() * 0.3})`;
+      g.beginPath();
+      g.arc(cx + (Math.random() - 0.5) * 64 * s, palmY + (Math.random() - 0.5) * 56 * s,
+        1 + Math.random() * 4, 0, 7);
+      g.fill();
+    }
+    if (drag) {                                            // smeared down — pulled away
+      for (let i = 0; i < 16; i++) {
+        const sx = cx + (Math.random() - 0.5) * 44 * s;
+        g.fillStyle = `rgba(78,6,6,${0.12 + Math.random() * 0.28})`;
+        g.fillRect(sx, palmY, 2 + Math.random() * 4, (h - palmY) * (0.4 + Math.random() * 0.6));
+      }
+    }
+  });
+}
+
+/* four parallel fingernail gouges scratched into the wall */
+function clawMarksTexture() {
+  return makeTexture(128, 160, (g, w, h) => {
+    g.clearRect(0, 0, w, h);
+    g.lineCap = 'round';
+    for (let i = 0; i < 4; i++) {
+      const x = w * 0.26 + i * (w * 0.48 / 3) + (Math.random() - 0.5) * 7;
+      const len = h * (0.66 + Math.random() * 0.26), y0 = h * 0.08;
+      const cpx = (Math.random() - 0.5) * 9;
+      g.strokeStyle = 'rgba(206,196,180,0.5)';             // scratched to lighter material
+      g.lineWidth = 2 + Math.random() * 1.6;
+      g.beginPath(); g.moveTo(x, y0);
+      g.bezierCurveTo(x + cpx, y0 + len * 0.4, x - cpx, y0 + len * 0.7, x + cpx * 0.4, y0 + len);
+      g.stroke();
+      g.strokeStyle = 'rgba(8,6,4,0.5)'; g.lineWidth = 1;  // a dark edge for depth
+      g.beginPath(); g.moveTo(x + 2, y0);
+      g.bezierCurveTo(x + 2 + cpx, y0 + len * 0.4, x + 2 - cpx, y0 + len * 0.7, x + 2 + cpx * 0.4, y0 + len);
+      g.stroke();
+    }
+  });
+}
+
+/* a short word, daubed in red and dripping */
+function scrawlWordTexture(text) {
+  return makeTexture(512, 256, (g, w, h) => {
+    g.clearRect(0, 0, w, h);
+    g.fillStyle = 'rgba(122,11,11,0.9)';
+    g.font = 'bold 84px Georgia'; g.textAlign = 'center';
+    g.save(); g.translate(w / 2, h / 2 + 24); g.rotate((Math.random() - 0.5) * 0.07);
+    g.fillText(text, 0, 0); g.restore();
+    for (let i = 0; i < text.length; i++) {                // drips
+      if (Math.random() < 0.55) {
+        const x = w / 2 + (i - text.length / 2 + 0.5) * 42;
+        g.fillStyle = 'rgba(96,7,7,0.6)';
+        g.fillRect(x + (Math.random() - 0.5) * 26, h / 2 + 34, 3, 28 + Math.random() * 80);
+      }
+    }
+  });
+}
+
+/* tally marks scratched into the wall — counting something */
+function tallyTexture(count) {
+  return makeTexture(512, 128, (g, w, h) => {
+    g.clearRect(0, 0, w, h);
+    g.strokeStyle = 'rgba(38,32,26,0.85)'; g.lineWidth = 3; g.lineCap = 'round';
+    let x = 18;
+    for (let i = 0; i < count; i++) {
+      if (i % 5 === 4) {                                   // diagonal slash across the last four
+        g.beginPath(); g.moveTo(x - 4 * 13 - 2, h * 0.24); g.lineTo(x - 4, h * 0.8); g.stroke();
+        x += 24;
+      } else {
+        const j = (Math.random() - 0.5) * 2.5;
+        g.beginPath(); g.moveTo(x + j, h * 0.22); g.lineTo(x - j, h * 0.82); g.stroke();
+        x += 13;
+      }
+    }
+  });
+}
+
 const wallTextTex = makeTexture(512, 256, (g, w, h) => {
   g.clearRect(0, 0, w, h);
   g.fillStyle = 'rgba(110,8,8,0.92)';
@@ -1077,6 +1168,36 @@ loopText.rotation.y = Math.PI / 2;            // west wall of leg A, faces +x in
 loopText.position.set(-1.24, 1.7, -6.2);
 loopText.visible = false;
 scene.add(loopText);
+
+/* ============================ WALL DECALS ============================
+   handprints, claw marks, scrawled words, tally marks. The worst of them
+   stay hidden until the second lap — the house gets wronger when you loop. */
+const loopDecals = [];   // revealed by applyLap() on lap >= 1
+function addDecal(tex, x, y, z, rotY, w, h, { opacity = 1, onLoop = false } = {}) {
+  tex.generateMipmaps = false; tex.minFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity,
+      depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+  m.rotation.y = rotY;
+  m.position.set(x, y, z);
+  m.visible = !onLoop;
+  scene.add(m);
+  if (onLoop) loopDecals.push(m);
+  return m;
+}
+const WEST = Math.PI / 2, EAST = -Math.PI / 2, NORTH = Math.PI;   // wall facings
+
+/* always there, faint — the house was never quite right */
+const tallyLow = addDecal(tallyTexture(7), -1.247, 1.45, -2.6, WEST, 0.55, 0.16, { opacity: 0.6 });
+addDecal(handprintTexture({ drag: true }), 1.247, 1.25, -11.6, EAST, 0.34, 0.5, { opacity: 0.5 });
+
+/* hidden until the loop — these appear on lap 2 */
+addDecal(handprintTexture({ child: true }), -9.94, 1.0, -14.45, WEST, 0.2, 0.3, { onLoop: true, opacity: 0.85 });
+addDecal(handprintTexture({ drag: true }), -1.247, 1.35, -8.6, WEST, 0.36, 0.56, { onLoop: true, opacity: 0.8 });
+addDecal(clawMarksTexture(), -9.94, 1.3, -15.95, WEST, 0.3, 0.46, { onLoop: true, opacity: 0.9 });
+addDecal(scrawlWordTexture('GET OUT'), 1.247, 2.25, -6.1, EAST, 1.2, 0.5, { onLoop: true, opacity: 0.9 });
+const tallyHigh = addDecal(tallyTexture(23), -1.247, 1.45, -2.6, WEST, 1.1, 0.16, { onLoop: true, opacity: 0.8 });
 
 /* ============================ LISA ============================
    Mixamo "Zombiegirl W Kurniawan" + animation clips from /zombie-pack.
@@ -1913,6 +2034,8 @@ function applyLap(n) {
   if (n >= 1) {                                          // the second pass is wrong
     for (const L of lamps) { L.base *= 0.5; L.light.color.set(0x8ea2c4); }
     loopText.visible = true;
+    for (const d of loopDecals) d.visible = true;        // handprints, claws, GET OUT, more tallies
+    tallyLow.visible = false;                            // the count has grown since you were here
     sob();                                               // a cue that something has changed
   }
 }
