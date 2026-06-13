@@ -1726,6 +1726,7 @@ function updateTease(dt, now) {
     lisa.position.set(-8.9, 0, teaseZ);
     lisa.lookAt(px, 0, pz);
     lisa.visible = true;
+    setLisaOpacity(0.26);                  // barely there at the corner — a glimpse, not a figure
     playLisa('idle');
     /* kill the sconce but leave the fluorescent stuttering —
        she is only ever glimpsed in the flashes */
@@ -1747,6 +1748,7 @@ function updateTease(dt, now) {
 /* ============================ THE SCARE ============================ */
 
 let scareState = 'armed';   // armed -> running -> corner -> done
+const ROOM_SCARE = false;   // in-room Lisa scare disabled for now (the corner tease stays)
 let scareT = 0, shakeAmp = 0, freezeScare = false, twitchAt = 0;
 const spawnPos = new THREE.Vector3();
 
@@ -1763,7 +1765,7 @@ function triggerScare() {
 }
 
 function updateScare(dt, now) {
-  if (scareState === 'armed' && px < -11.5) triggerScare();
+  if (ROOM_SCARE && scareState === 'armed' && px < -11.5) triggerScare();
 
   if (scareState === 'corner') {                          // she waits, facing the wall
     lisa.scale.y = 1 + Math.sin(now * 1.7) * 0.004;       // breathing
