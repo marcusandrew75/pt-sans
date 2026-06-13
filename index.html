@@ -1015,11 +1015,12 @@ addBox(0.12, 0.15, 0.28, 1.06, 0.905, -10.18, ironMat, { cast: true });
 /* HD prop: a dead camera on the sideboard (Poly Haven Camera_01, CC0) */
 new GLTFLoader().load('./models/Camera_01_2k.gltf/Camera_01_2k.gltf', (gltf) => {
   const cam = gltf.scene;
-  cam.rotation.y = Math.PI / 2;                          // lens toward the corridor (tuned by eye)
+  cam.scale.setScalar(1.35);                             // a touch larger — more of a hero piece
+  cam.rotation.y = Math.PI / 2 + 0.32;                   // lens toward the corridor, angled naturally
   cam.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(cam);
   const c = box.getCenter(new THREE.Vector3());
-  cam.position.set(1.0 - c.x, 0.832 - box.min.y, -9.98 - c.z);   // rest its base on the top, centred
+  cam.position.set(1.04 - c.x, 0.832 - box.min.y, -9.93 - c.z);  // rest its base on the top, nudged back
   cam.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   scene.add(cam);
   window.__cam = cam;                                    // live handle for tuning
