@@ -1161,7 +1161,7 @@ const fbxLoader = new FBXLoader();
   playLisa('idle');
 })().catch(e => console.error('Lisa failed to load:', e));
 
-/* ============================ AUDIO (all synthesized) ============================ */
+/* ============================ AUDIO (synthesized + optional /sounds samples) ============================ */
 
 let AC = null, master = null, verb = null, noiseBuf = null, riserGain = null, humGain = null, murGain = null;
 let nextBeat = 0, beatHeavy = true;
@@ -1180,9 +1180,36 @@ function route(node, wet = 0.25) {
   }
 }
 
+/* ---- optional real samples from /sounds, layered over the synth ---- */
+const SOUNDS = { scream: 'dragon-studio-scary-scream-401725.mp3' };
+const samples = {};
+async function loadSamples() {
+  for (const [name, file] of Object.entries(SOUNDS)) {
+    try {
+      const arr = await (await fetch('./sounds/' + encodeURIComponent(file))).arrayBuffer();
+      samples[name] = await AC.decodeAudioData(arr);
+    } catch (e) { console.warn('sound load failed:', file, e); }
+  }
+}
+function playSample(buf, { gain = 1, rate = 1, wet = 0.35, fade = 0 } = {}) {
+  if (!AC || !buf) return null;
+  const t = AC.currentTime;
+  const src = AC.createBufferSource();
+  src.buffer = buf; src.playbackRate.value = rate;
+  const g = AC.createGain(); g.gain.value = gain;
+  if (fade > 0) {                              // let it ring, then bow out before the tail drags
+    g.gain.setValueAtTime(gain, t + fade);
+    g.gain.exponentialRampToValueAtTime(0.001, t + fade + 0.6);
+  }
+  src.connect(g); route(g, wet);
+  src.start(t);
+  return src;
+}
+
 function initAudio() {
   if (AC) { AC.resume(); return; }
   AC = new (window.AudioContext || window.webkitAudioContext)();
+  loadSamples();
   const comp = AC.createDynamicsCompressor();
   comp.threshold.value = -18; comp.ratio.value = 8;
   comp.connect(AC.destination);
@@ -1546,22 +1573,26 @@ function scareSting() {
   ng.gain.setValueAtTime(0.85, t);
   ng.gain.exponentialRampToValueAtTime(0.001, t + 1.4);
   n.connect(bp); bp.connect(ng); route(ng, 0.5); n.start(t); n.stop(t + 1.5);
-  /* the scream — fast-wobbling saw through a vocal formant */
-  const sc = AC.createOscillator(); sc.type = 'sawtooth';
-  sc.frequency.setValueAtTime(520, t);
-  sc.frequency.linearRampToValueAtTime(880, t + 0.18);
-  sc.frequency.exponentialRampToValueAtTime(310, t + 1.0);
-  const fm = AC.createOscillator(); fm.frequency.value = 28;
-  const fmg = AC.createGain(); fmg.gain.value = 60;
-  fm.connect(fmg); fmg.connect(sc.frequency); fm.start(t); fm.stop(t + 1.1);
-  const form = AC.createBiquadFilter(); form.type = 'bandpass';
-  form.frequency.value = 950; form.Q.value = 1.4;
-  const sg = AC.createGain();
-  sg.gain.setValueAtTime(0.001, t);
-  sg.gain.exponentialRampToValueAtTime(0.34, t + 0.05);
-  sg.gain.exponentialRampToValueAtTime(0.001, t + 1.05);
-  sc.connect(form); form.connect(sg); route(sg, 0.55);
-  sc.start(t); sc.stop(t + 1.1);
+  /* the scream — a real recorded voice if loaded, else the synth fallback */
+  if (samples.scream) {
+    playSample(samples.scream, { gain: 1.15, rate: 0.94, wet: 0.4, fade: 1.9 });
+  } else {
+    const sc = AC.createOscillator(); sc.type = 'sawtooth';
+    sc.frequency.setValueAtTime(520, t);
+    sc.frequency.linearRampToValueAtTime(880, t + 0.18);
+    sc.frequency.exponentialRampToValueAtTime(310, t + 1.0);
+    const fm = AC.createOscillator(); fm.frequency.value = 28;
+    const fmg = AC.createGain(); fmg.gain.value = 60;
+    fm.connect(fmg); fmg.connect(sc.frequency); fm.start(t); fm.stop(t + 1.1);
+    const form = AC.createBiquadFilter(); form.type = 'bandpass';
+    form.frequency.value = 950; form.Q.value = 1.4;
+    const sg = AC.createGain();
+    sg.gain.setValueAtTime(0.001, t);
+    sg.gain.exponentialRampToValueAtTime(0.34, t + 0.05);
+    sg.gain.exponentialRampToValueAtTime(0.001, t + 1.05);
+    sc.connect(form); form.connect(sg); route(sg, 0.55);
+    sc.start(t); sc.stop(t + 1.1);
+  }
   /* dissonant cluster pitching down */
   for (const f of [185, 233, 311, 466]) {
     const o = AC.createOscillator(); o.type = 'sawtooth';
@@ -1853,6 +1884,9 @@ window.__pt = {
   },
   hideLisa: () => { lisa.visible = false; },
   step: (dt = 1 / 60, n = 1) => { for (let i = 0; i < n; i++) tick(dt); },
+  initAudio: () => initAudio(),
+  sting: () => scareSting(),
+  samples,
   scene, camera, lisa, wallText,
 };
 
