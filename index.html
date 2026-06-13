@@ -25,7 +25,7 @@
 <div id="crosshair"></div>
 <div id="overlay">
   <h1>P.T. SANS</h1>
-  <h2>A HALLWAY, MOSTLY</h2>
+  <h2>A HOMAGE TO HIDEO KOJIMA &nbsp;—&nbsp; BUILT IN CLAUDE CODE</h2>
   <p>WASD &nbsp;—&nbsp; move</p>
   <p>MOUSE &nbsp;—&nbsp; look</p>
   <p>HEADPHONES &nbsp;—&nbsp; strongly advised</p>
@@ -1073,32 +1073,46 @@ function playLisa(name, fade = 0.12) {
 
 /* Turn the zombie into Lisa: bleach the textures to a pale spectre,
    keep the hair dark, and dress her in a stained floor-length nightgown. */
+const lisaGhostMats = [];   // her body materials, for ramping opacity during the lunge
+const LISA_BASE_OPACITY = 0.55;
+function setLisaOpacity(o) { for (const m of lisaGhostMats) m.opacity = o; }
+
 function ghostifyMaterial(m) {
-  /* the hair cards are the only transparent materials on this model */
-  const isHair = m.transparent || /hair/i.test(m.name || '');
+  /* the hair cards are the only originally-transparent materials — delete them.
+     she has no hair now. a bald, wet skull reads far worse. */
+  if (m.transparent || /hair/i.test(m.name || '')) {
+    m.opacity = 0;
+    m.colorWrite = false;
+    m.depthWrite = false;
+    m.needsUpdate = true;
+    return;
+  }
+  /* bleach the body to a cold corpse-pale, then make her a translucent apparition */
   if (m.map && m.map.image) {
     const img = m.map.image;
     const c = document.createElement('canvas');
     c.width = img.width; c.height = img.height;
     const g = c.getContext('2d');
-    g.filter = isHair
-      ? 'saturate(0.15) brightness(0.45)'
-      : 'saturate(0.12) brightness(1.4) contrast(0.9)';
+    g.filter = 'saturate(0.07) brightness(1.7) contrast(0.82)';
     g.drawImage(img, 0, 0);
     g.filter = 'none';
-    if (!isHair) {
-      g.fillStyle = 'rgba(196,203,206,0.16)';             // cold mortuary wash
-      g.fillRect(0, 0, c.width, c.height);
-    }
+    g.fillStyle = 'rgba(202,214,224,0.24)';               // cold spectral wash
+    g.fillRect(0, 0, c.width, c.height);
     const t = new THREE.CanvasTexture(c);
     t.colorSpace = m.map.colorSpace;
     t.flipY = m.map.flipY;
     t.wrapS = m.map.wrapS; t.wrapT = m.map.wrapT;
     m.map = t;
   }
-  if (m.color) m.color.set(isHair ? 0x2e2a26 : 0xe8eaec);
-  if ('shininess' in m) m.shininess = 5;
+  if (m.color) m.color.set(0xdfe8ee);                      // cold blue-white
+  if (m.emissive) m.emissive.set(0x33404a);               // faint inner glow, so she reads in the dark
+  if ('emissiveIntensity' in m) m.emissiveIntensity = 0.55;
+  if ('shininess' in m) m.shininess = 8;
+  m.transparent = true;
+  m.opacity = LISA_BASE_OPACITY;
+  m.depthWrite = false;                                    // see through her own body — ethereal
   m.needsUpdate = true;
+  lisaGhostMats.push(m);
 }
 
 /* FBXLoader assigns texture images asynchronously — wait until the maps are
@@ -1119,51 +1133,6 @@ function ghostifyWhenReady(char) {
   }, 200);
 }
 
-const gownTex = makeTexture(256, 512, (g, w, h) => {
-  g.fillStyle = '#b6b0a2'; g.fillRect(0, 0, w, h);
-  for (let i = 0; i < 90; i++) {                          // stains running down
-    g.fillStyle = `rgba(96,84,66,${0.04 + Math.random() * 0.12})`;
-    g.fillRect(Math.random() * w, Math.random() * h, 2 + Math.random() * 8, 30 + Math.random() * 160);
-  }
-  for (let i = 0; i < 120; i++) {                         // blotches, heavier low down
-    g.fillStyle = `rgba(70,58,44,${0.04 + Math.random() * 0.12})`;
-    g.beginPath();
-    g.ellipse(Math.random() * w, h * (0.3 + Math.random() * 0.7),
-      4 + Math.random() * 20, 3 + Math.random() * 14, Math.random(), 0, 7);
-    g.fill();
-  }
-  const grad = g.createLinearGradient(0, h * 0.55, 0, h); // filthy hem (v=0 at bottom)
-  grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, 'rgba(30,22,14,0.5)');
-  g.fillStyle = grad; g.fillRect(0, 0, w, h);
-});
-gownTex.wrapT = THREE.ClampToEdgeWrapping;
-
-function buildGown() {
-  const pts = [
-    [0.34, 0.00], [0.31, 0.20], [0.285, 0.50], [0.27, 0.75],
-    [0.265, 0.95], [0.245, 1.10], [0.215, 1.22], [0.185, 1.30],
-  ].map(p => new THREE.Vector2(p[0], p[1]));
-  const geo = new THREE.LatheGeometry(pts, 26);
-  const pos = geo.attributes.position;
-  for (let i = 0; i < pos.count; i++) {
-    let vx = pos.getX(i), vy = pos.getY(i), vz = pos.getZ(i);
-    if (vy < 0.22) {                                      // ragged hem
-      const a = Math.atan2(vz, vx);
-      const k = 1 + 0.06 * (Math.sin(a * 7.3) * 0.6 + Math.sin(a * 13.1 + 1.7) * 0.4) * (0.22 - vy) / 0.22;
-      vx *= k; vz *= k;
-    }
-    if (vz > 0 && vy > 0.7 && vy < 1.15) {                // she is carrying
-      vz *= 1 + 0.38 * Math.exp(-Math.pow((vy - 0.92) / 0.14, 2));
-    }
-    pos.setXYZ(i, vx, vy, vz);
-  }
-  geo.computeVertexNormals();
-  const gown = new THREE.Mesh(geo,
-    new THREE.MeshStandardMaterial({ map: gownTex, roughness: 0.95 }));
-  gown.castShadow = true;
-  return gown;
-}
-
 const fbxLoader = new FBXLoader();
 (async () => {
   const char = await fbxLoader.loadAsync('./zombie-pack/' + encodeURIComponent('Zombiegirl W Kurniawan.fbx'));
@@ -1172,35 +1141,12 @@ const fbxLoader = new FBXLoader();
   char.scale.setScalar(1.9 / size.y);
   char.traverse(o => {
     if (o.isMesh) {
-      o.castShadow = true;
+      o.castShadow = false;             // a ghost throws no shadow
       o.frustumCulled = false;          // skinned bounds lie; never let her vanish
     }
   });
-  ghostifyWhenReady(char);
-  /* her legs live inside the gown now — collapse them so they can't clip through */
-  char.traverse(o => { if (o.isBone && /UpLeg/i.test(o.name)) o.scale.setScalar(0.001); });
-  /* dark hair, swept up — attached to the head bone so it rides every animation */
-  let headBone = null;
-  char.traverse(o => { if (o.isBone && /head$/i.test(o.name) && !headBone) headBone = o; });
-  if (headBone) {
-    /* bones carry the FBX cm→m scale, so size the hair in bone-local units */
-    const ws = new THREE.Vector3();
-    headBone.getWorldScale(ws);
-    const U = 1 / ws.x;                                   // bone-local units per metre
-    const hairM = new THREE.MeshStandardMaterial({ color: 0x141009, roughness: 1 });
-    const mass = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 10), hairM);
-    mass.scale.set(0.11 * U, 0.13 * U, 0.115 * U);
-    mass.position.set(0, 0.075 * U, -0.02 * U);
-    mass.castShadow = true;
-    headBone.add(mass);
-    const bun = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), hairM);
-    bun.scale.setScalar(0.06 * U);
-    bun.position.set(0, 0.16 * U, -0.055 * U);
-    bun.castShadow = true;
-    headBone.add(bun);
-  }
+  ghostifyWhenReady(char);              // bleach the body, delete the hair cards, make her translucent
   lisa.add(char);
-  lisa.add(buildGown());
   lisaMixer = new THREE.AnimationMixer(char);
   const wanted = { idle: 'zombie idle', scream: 'zombie scream', walk: 'zombie walk' };
   for (const [key, file] of Object.entries(wanted)) {
@@ -1208,8 +1154,7 @@ const fbxLoader = new FBXLoader();
     const clip = anim.animations[0];
     /* strip root translation (game code owns her position) and scale tracks
        (so the collapsed legs stay collapsed) */
-    clip.tracks = clip.tracks.filter(t =>
-      !t.name.endsWith('Hips.position') && !t.name.endsWith('.scale'));
+    clip.tracks = clip.tracks.filter(t => !t.name.endsWith('Hips.position'));
     lisaActions[key] = lisaMixer.clipAction(clip);
   }
   lisaActions.scream.timeScale = 1.5;   // the lunge window is short
@@ -1810,6 +1755,7 @@ function updateScare(dt, now) {
       (Math.random() - 0.5) * 0.04,
       spawnPos.z + (tz - spawnPos.z) * kq + (Math.random() - 0.5) * 0.05);
     lisa.lookAt(px, 0, pz);
+    setLisaOpacity(0.4 + 0.55 * k);                       // ethereal on approach, near-solid in your face
     shakeAmp = 0.035;                                     // the scream clip does the reaching
   } else if (scareT < 1.55) {                             // blackout again
     scareBlackout = true;
@@ -1830,6 +1776,7 @@ function updateScare(dt, now) {
     doorSolid.disabled = false;
     doorSlam();
     /* she didn't leave. she's in the corner, facing the wall. */
+    setLisaOpacity(LISA_BASE_OPACITY);                    // ethereal again
     playLisa('idle', 0.4);
     lisa.position.set(-15.5, 0, -17.8);
     lisa.lookAt(-16.6, 0, -18.9);
