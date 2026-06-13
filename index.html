@@ -1,0 +1,1946 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>P.T. SANS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#000;overflow:hidden;font-family:Georgia,'Times New Roman',serif;}
+  #app{position:fixed;inset:0;}
+  canvas{display:block;}
+  #crosshair{position:fixed;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:50%;
+    background:rgba(255,255,255,0.35);pointer-events:none;display:none;}
+  #overlay{position:fixed;inset:0;background:#000;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;z-index:10;cursor:pointer;transition:opacity 0.6s;}
+  #overlay h1{color:#7a7268;font-size:54px;letter-spacing:18px;font-weight:normal;margin:0 0 8px 18px;}
+  #overlay h2{color:#3d3a35;font-size:13px;letter-spacing:6px;font-weight:normal;margin:0 0 60px 6px;}
+  #overlay p{color:#4a463f;font-size:14px;letter-spacing:2px;margin:4px;}
+  #overlay .start{color:#8a8378;margin-top:50px;font-size:15px;letter-spacing:3px;animation:pulse 2.4s infinite;}
+  @keyframes pulse{0%,100%{opacity:0.35}50%{opacity:1}}
+  #overlay.hidden{opacity:0;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="crosshair"></div>
+<div id="overlay">
+  <h1>P.T. SANS</h1>
+  <h2>A HALLWAY, MOSTLY</h2>
+  <p>WASD &nbsp;—&nbsp; move</p>
+  <p>MOUSE &nbsp;—&nbsp; look</p>
+  <p>HEADPHONES &nbsp;—&nbsp; strongly advised</p>
+  <p class="start">click to wake up</p>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "./three-js/build/three.module.js",
+  "three/addons/": "./three-js/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+
+/* ============================ RENDERER / SCENE ============================ */
+
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+/* grain + darkness hide a lower internal res; the post chain is the budget */
+const DPR = Math.min(devicePixelRatio, 1.4);
+renderer.setPixelRatio(DPR);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.18;  // post chain (AO + vignette) eats some light
+app.appendChild(renderer.domElement);
+const MAX_ANISO = renderer.capabilities.getMaxAnisotropy();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x040408);
+scene.fog = new THREE.FogExp2(0x040408, 0.082);
+
+const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.05, 60);
+camera.rotation.order = 'YXZ';
+
+/* ============================ POST-PROCESSING ============================
+   render → GTAO (contact shadows) → bloom → tonemap → grime
+   (chromatic aberration + film grain + scanlines + vignette)            */
+
+const GrimeShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    time: { value: 0 },
+    resolution: { value: new THREE.Vector2(innerWidth, innerHeight) },
+  },
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: /* glsl */`
+    uniform sampler2D tDiffuse;
+    uniform float time;
+    uniform vec2 resolution;
+    varying vec2 vUv;
+    float rand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }
+    void main() {
+      vec2 c = vUv - 0.5;
+      float d = length(c);
+      vec2 dir = d > 0.0001 ? c / d : vec2(0.0);
+      /* chromatic aberration, stronger toward the edges */
+      float ca = 0.0028 * smoothstep(0.1, 0.7, d);
+      vec3 col;
+      col.r = texture2D(tDiffuse, vUv - dir * ca).r;
+      col.g = texture2D(tDiffuse, vUv).g;
+      col.b = texture2D(tDiffuse, vUv + dir * ca).b;
+      /* animated film grain */
+      float g = rand(vUv * resolution * 0.75 + vec2(mod(time * 61.7, 89.0), mod(time * 38.3, 71.0)));
+      col += (g - 0.5) * 0.06;
+      /* faint scanlines */
+      col *= 0.97 + 0.03 * sin(vUv.y * resolution.y * 1.5);
+      /* vignette */
+      col *= 1.0 - 0.78 * smoothstep(0.42, 0.95, d);
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+};
+
+const composer = new EffectComposer(renderer,
+  new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 2 }));
+composer.setPixelRatio(DPR);
+composer.setSize(innerWidth, innerHeight);
+composer.addPass(new RenderPass(scene, camera));
+const gtaoPass = new GTAOPass(scene, camera, innerWidth, innerHeight);
+gtaoPass.updateGtaoMaterial({ radius: 0.3, distanceExponent: 1.5, thickness: 1, scale: 1.3, samples: 8 });
+gtaoPass.updatePdMaterial({ rings: 2, samples: 8 });   // lighter denoise
+composer.addPass(gtaoPass);
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.3, 0.45, 0.85));
+composer.addPass(new OutputPass());
+const grimePass = new ShaderPass(GrimeShader);
+composer.addPass(grimePass);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+  grimePass.uniforms.resolution.value.set(innerWidth, innerHeight);
+});
+
+/* ============================ PROCEDURAL TEXTURES ============================ */
+
+function makeTexture(w, h, draw) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = MAX_ANISO;
+  return t;
+}
+
+/* damask motif — a small symmetrical curlicue */
+function drawMotif(g, x, y, s, style) {
+  g.save(); g.translate(x, y); g.scale(s, s); g.strokeStyle = style; g.lineWidth = 1.6;
+  g.beginPath(); g.ellipse(0, -4, 2.6, 5, 0, 0, 7); g.stroke();          // bud
+  for (const m of [-1, 1]) {                                             // curls
+    g.beginPath(); g.moveTo(0, 0);
+    g.bezierCurveTo(m * 6, 2, m * 8, 8, m * 3, 11);
+    g.stroke();
+  }
+  g.beginPath(); g.moveTo(0, 1); g.lineTo(0, 13); g.stroke();            // stem
+  g.restore();
+}
+
+const wallpaperTex = makeTexture(1024, 1024, (g, w, h) => {
+  const S = w / 512;
+  g.fillStyle = '#56574b'; g.fillRect(0, 0, w, h);        // tired grey-green paint
+  for (let i = 0; i < 900 * S; i++) {                     // soft mottling
+    g.fillStyle = Math.random() < 0.5
+      ? `rgba(106,106,93,${0.02 + Math.random() * 0.04})`
+      : `rgba(58,59,50,${0.02 + Math.random() * 0.04})`;
+    g.beginPath();
+    g.ellipse(Math.random() * w, Math.random() * h,
+      (8 + Math.random() * 40) * S, (6 + Math.random() * 30) * S,
+      Math.random() * 3, 0, 7);
+    g.fill();
+  }
+  for (let i = 0; i < 70 * S; i++) {                      // faint vertical streaking
+    g.fillStyle = `rgba(30,30,24,${0.015 + Math.random() * 0.03})`;
+    g.fillRect(Math.random() * w, 0, (1.5 + Math.random() * 4) * S, h);
+  }
+  for (let i = 0; i < 10; i++) {                          // larger damp stains
+    const x = Math.random() * w, y = Math.random() * h, r = (40 + Math.random() * 90) * S;
+    const sg = g.createRadialGradient(x, y, r * 0.2, x, y, r);
+    sg.addColorStop(0, 'rgba(40,40,32,0.10)'); sg.addColorStop(1, 'rgba(40,40,32,0)');
+    g.fillStyle = sg; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+  }
+  for (let i = 0; i < 260 * S * S; i++) {                 // speckle
+    g.fillStyle = `rgba(${Math.random() < 0.5 ? '20,20,16' : '150,150,135'},${Math.random() * 0.05})`;
+    g.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+  }
+});
+
+const floorTex = makeTexture(1024, 1024, (g, w, h) => {
+  const S = w / 512;
+  g.fillStyle = '#241708'; g.fillRect(0, 0, w, h);
+  const pl = 110 * S, pw = 34 * S;                        // herringbone parquet
+  for (let j = -2; j < h / (pl * 0.5) + 2; j++) {
+    for (let i = -2; i < w / (pl * 0.5) + 2; i++) {
+      const cx = i * pl * 0.5;
+      const cy = j * pl * 0.5 + (i % 2 ? pl * 0.25 : -pl * 0.25);
+      const shade = 38 + Math.random() * 26;
+      g.save();
+      g.translate(cx, cy);
+      g.rotate(i % 2 ? Math.PI / 4 : -Math.PI / 4);
+      g.fillStyle = `rgb(${shade + 16},${(shade * 0.84) | 0},${(shade * 0.58) | 0})`;
+      g.fillRect(-pl / 2, -pw / 2, pl, pw);
+      g.strokeStyle = 'rgba(0,0,0,0.55)'; g.lineWidth = 1.5 * S;
+      g.strokeRect(-pl / 2, -pw / 2, pl, pw);
+      for (let k = 0; k < 5; k++) {                       // grain along the block
+        g.strokeStyle = `rgba(0,0,0,${0.05 + Math.random() * 0.08})`;
+        g.lineWidth = S;
+        const gy = -pw / 2 + Math.random() * pw;
+        g.beginPath(); g.moveTo(-pl / 2, gy);
+        g.lineTo(pl / 2, gy + (Math.random() - 0.5) * 4 * S);
+        g.stroke();
+      }
+      g.restore();
+    }
+  }
+  for (let i = 0; i < 24; i++) {                          // worn sheen patches
+    const x = Math.random() * w, y = Math.random() * h, r = (50 + Math.random() * 120) * S;
+    const sg = g.createRadialGradient(x, y, r * 0.2, x, y, r);
+    sg.addColorStop(0, Math.random() < 0.5 ? 'rgba(255,235,200,0.05)' : 'rgba(0,0,0,0.12)');
+    sg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = sg; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+  }
+  for (let i = 0; i < 140 * S * S; i++) {                 // scuffs
+    g.fillStyle = `rgba(0,0,0,${Math.random() * 0.1})`;
+    g.beginPath();
+    g.arc(Math.random() * w, Math.random() * h, (1 + Math.random() * 6) * S, 0, 7);
+    g.fill();
+  }
+});
+
+const ceilingTex = makeTexture(256, 256, (g, w, h) => {
+  g.fillStyle = '#1e1c19'; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 160; i++) {
+    g.fillStyle = `rgba(60,50,34,${Math.random() * 0.12})`;
+    g.beginPath();
+    g.arc(Math.random() * w, Math.random() * h, 8 + Math.random() * 36, 0, 7);
+    g.fill();
+  }
+});
+
+const doorTex = makeTexture(512, 1024, (g, w, h) => {
+  const S = w / 256;
+  g.fillStyle = '#c9c4b4'; g.fillRect(0, 0, w, h);        // old white paint
+  for (let i = 0; i < 200 * S; i++) {                     // brush texture
+    g.strokeStyle = `rgba(${Math.random() < 0.5 ? '255,253,244' : '150,146,130'},${0.04 + Math.random() * 0.06})`;
+    g.lineWidth = (1 + Math.random()) * S;
+    const x = Math.random() * w;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x + (Math.random() - 0.5) * 8 * S, h); g.stroke();
+  }
+  function panel(px, py, pw2, ph2) {                      // bevelled recessed panel
+    g.strokeStyle = 'rgba(70,66,56,0.55)'; g.lineWidth = 3 * S;
+    g.strokeRect(px, py, pw2, ph2);
+    g.strokeStyle = 'rgba(255,255,248,0.5)'; g.lineWidth = 2 * S;
+    g.strokeRect(px + 4 * S, py + 4 * S, pw2 - 8 * S, ph2 - 8 * S);
+    g.fillStyle = 'rgba(60,56,46,0.10)';
+    g.fillRect(px + 6 * S, py + 6 * S, pw2 - 12 * S, ph2 - 12 * S);
+  }
+  panel(30 * S, 36 * S, w - 60 * S, h / 2 - 70 * S);
+  panel(30 * S, h / 2 + 16 * S, w - 60 * S, h / 2 - 70 * S);
+  for (let i = 0; i < 120 * S * S; i++) {                 // handling grime
+    g.fillStyle = `rgba(60,55,42,${Math.random() * 0.08})`;
+    g.beginPath();
+    g.arc(Math.random() * w, Math.random() * h, (2 + Math.random() * 9) * S, 0, 7);
+    g.fill();
+  }
+  const eg = g.createLinearGradient(0, h * 0.86, 0, h);   // kicked-up bottom edge
+  eg.addColorStop(0, 'rgba(50,46,36,0)'); eg.addColorStop(1, 'rgba(50,46,36,0.35)');
+  g.fillStyle = eg; g.fillRect(0, 0, w, h);
+});
+
+/* the basement pocket — near-black damp concrete with long cracks */
+const concreteTex = makeTexture(1024, 1024, (g, w, h) => {
+  const S = w / 512;
+  g.fillStyle = '#2a2c2e'; g.fillRect(0, 0, w, h);         // cold grey-blue base
+  for (let i = 0; i < 1100 * S; i++) {                     // heavy mottling
+    g.fillStyle = Math.random() < 0.5
+      ? `rgba(20,21,23,${0.04 + Math.random() * 0.08})`
+      : `rgba(58,61,64,${0.03 + Math.random() * 0.06})`;
+    g.beginPath();
+    g.ellipse(Math.random() * w, Math.random() * h,
+      (6 + Math.random() * 34) * S, (5 + Math.random() * 24) * S,
+      Math.random() * 3, 0, 7);
+    g.fill();
+  }
+  for (let i = 0; i < 9; i++) {                            // large damp radial stains
+    const x = Math.random() * w, y = Math.random() * h, r = (60 + Math.random() * 130) * S;
+    const sg = g.createRadialGradient(x, y, r * 0.15, x, y, r);
+    sg.addColorStop(0, 'rgba(8,9,11,0.22)'); sg.addColorStop(1, 'rgba(8,9,11,0)');
+    g.fillStyle = sg; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+  }
+  /* a few long jagged cracks with small branches */
+  function crack(x, y, ang, len, depth) {
+    if (depth > 3) return;
+    g.strokeStyle = `rgba(150,152,156,${0.10 + Math.random() * 0.08})`;
+    g.lineWidth = (0.6 + Math.random()) * S;
+    let cx = x, cy = y, a = ang;
+    g.beginPath(); g.moveTo(cx, cy);
+    const steps = 18 + Math.random() * 22;
+    for (let s = 0; s < steps; s++) {
+      a += (Math.random() - 0.5) * 0.6;
+      cx += Math.cos(a) * (len / steps);
+      cy += Math.sin(a) * (len / steps);
+      g.lineTo(cx, cy);
+      if (Math.random() < 0.08) crack(cx, cy, a + (Math.random() - 0.5) * 1.6, len * 0.35, depth + 2);
+    }
+    g.stroke();
+  }
+  crack(w * 0.2, -10, 1.4, h * 1.1, 0);
+  crack(w * 0.7, h * 0.1, 1.9, h * 0.9, 0);
+  crack(-10, h * 0.45, 0.3, w * 1.0, 1);
+  for (let i = 0; i < 320 * S * S; i++) {                  // speckle
+    g.fillStyle = `rgba(${Math.random() < 0.5 ? '10,10,12' : '120,122,126'},${Math.random() * 0.05})`;
+    g.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+  }
+});
+
+/* the dark door — 4-panel near-black wood, non-tiling so a gradient is safe */
+const darkDoorTex = makeTexture(512, 1024, (g, w, h) => {
+  const S = w / 256;
+  g.fillStyle = '#1a1410'; g.fillRect(0, 0, w, h);         // very dark base
+  for (let i = 0; i < 180 * S; i++) {                      // subtle vertical grain
+    g.strokeStyle = `rgba(${Math.random() < 0.5 ? '40,32,24' : '8,6,4'},${0.05 + Math.random() * 0.08})`;
+    g.lineWidth = (0.6 + Math.random()) * S;
+    const x = Math.random() * w;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x + (Math.random() - 0.5) * 6 * S, h); g.stroke();
+  }
+  function panel(px, py, pw2, ph2) {                       // bevelled recessed panel
+    g.strokeStyle = 'rgba(0,0,0,0.7)'; g.lineWidth = 4 * S;
+    g.strokeRect(px, py, pw2, ph2);
+    g.strokeStyle = 'rgba(255,255,255,0.08)'; g.lineWidth = 2 * S;
+    g.strokeRect(px + 5 * S, py + 5 * S, pw2 - 10 * S, ph2 - 10 * S);
+  }
+  const colW = (w - 30 * S) / 2, rowH = (h - 36 * S) / 2;
+  panel(10 * S, 12 * S, colW - 5 * S, rowH - 18 * S);
+  panel(20 * S + colW, 12 * S, colW - 5 * S, rowH - 18 * S);
+  panel(10 * S, rowH + 24 * S, colW - 5 * S, rowH - 18 * S);
+  panel(20 * S + colW, rowH + 24 * S, colW - 5 * S, rowH - 18 * S);
+  for (let i = 0; i < 60 * S; i++) {                       // worn lighter edges near the lock
+    g.fillStyle = `rgba(120,104,82,${Math.random() * 0.10})`;
+    g.beginPath();
+    g.arc(w * 0.86 + (Math.random() - 0.5) * 40 * S, h * 0.5 + (Math.random() - 0.5) * 90 * S,
+      (1 + Math.random() * 5) * S, 0, 7);
+    g.fill();
+  }
+  const eg = g.createLinearGradient(0, h * 0.78, 0, h);    // grime bottom gradient
+  eg.addColorStop(0, 'rgba(0,0,0,0)'); eg.addColorStop(1, 'rgba(0,0,0,0.55)');
+  g.fillStyle = eg; g.fillRect(0, 0, w, h);
+});
+
+/* an old painted portrait — the sitter has a face, and the face has had enough */
+function portraitTexture() {
+  return makeTexture(160, 200, (g, w, h) => {
+    const grad = g.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, '#332f25'); grad.addColorStop(1, '#100e0a');
+    g.fillStyle = grad; g.fillRect(0, 0, w, h);
+    const cx = w / 2, cy = h * 0.42;
+    g.fillStyle = '#16120c';                              // dark coat, high shoulders
+    g.beginPath(); g.ellipse(cx, h * 1.02, w * 0.46, h * 0.48, 0, Math.PI, 0); g.fill();
+    g.fillStyle = '#d6cbb2';                              // collar
+    g.beginPath(); g.moveTo(cx - 13, h * 0.62); g.lineTo(cx, h * 0.7); g.lineTo(cx + 13, h * 0.62);
+    g.lineTo(cx + 8, h * 0.56); g.lineTo(cx - 8, h * 0.56); g.fill();
+    g.fillStyle = '#b9a784';                              // the face
+    g.beginPath(); g.ellipse(cx, cy, w * 0.18, h * 0.17, 0, 0, 7); g.fill();
+    g.fillStyle = '#191309';                              // severe combed hair
+    g.beginPath(); g.ellipse(cx, cy - h * 0.115, w * 0.2, h * 0.085, 0, Math.PI, 0, true); g.fill();
+    g.fillStyle = 'rgba(90,74,52,0.5)';                   // sunken sockets
+    g.beginPath(); g.ellipse(cx - 11, cy - 4, 7, 5, 0, 0, 7); g.fill();
+    g.beginPath(); g.ellipse(cx + 11, cy - 4, 7, 5, 0, 0, 7); g.fill();
+    g.fillStyle = '#0c0905';                              // eyes — one fractionally off
+    g.beginPath(); g.ellipse(cx - 11, cy - 4, 2.6, 3.2, 0, 0, 7); g.fill();
+    g.beginPath(); g.ellipse(cx + 11.8, cy - 3.4, 2.6, 3.2, 0, 0, 7); g.fill();
+    g.fillStyle = 'rgba(255,250,235,0.65)';
+    g.fillRect(cx - 11.8, cy - 5.6, 1.2, 1.2); g.fillRect(cx + 11, cy - 5, 1.2, 1.2);
+    g.strokeStyle = 'rgba(80,60,40,0.8)'; g.lineWidth = 1.2;
+    g.beginPath(); g.moveTo(cx, cy + 2); g.lineTo(cx - 1.5, cy + 9); g.stroke();   // nose
+    g.strokeStyle = '#241a10'; g.lineWidth = 1.8;
+    g.beginPath(); g.moveTo(cx - 7, cy + 16); g.lineTo(cx + 7, cy + 15); g.stroke(); // a flat line of a mouth
+    for (let i = 0; i < 60; i++) {                        // craquelure
+      g.strokeStyle = `rgba(0,0,0,${0.06 + Math.random() * 0.1})`;
+      g.lineWidth = 0.6;
+      const x0 = Math.random() * w, y0 = Math.random() * h;
+      g.beginPath(); g.moveTo(x0, y0);
+      g.lineTo(x0 + (Math.random() - 0.5) * 18, y0 + (Math.random() - 0.5) * 18);
+      g.stroke();
+    }
+    const vg = g.createRadialGradient(cx, h * 0.45, h * 0.25, cx, h * 0.45, h * 0.75);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(8,6,3,0.55)');
+    g.fillStyle = vg; g.fillRect(0, 0, w, h);
+  });
+}
+
+const scrawlTex = makeTexture(512, 128, (g, w, h) => {
+  g.clearRect(0, 0, w, h);
+  g.strokeStyle = 'rgba(28,24,18,0.65)'; g.lineWidth = 1.6;
+  let x = 14;                                             // illegible handwriting
+  for (let word = 0; word < 7 && x < w - 30; word++) {
+    const y = h / 2 + (Math.random() - 0.5) * 16;
+    g.beginPath(); g.moveTo(x, y);
+    const wlen = 30 + Math.random() * 50;
+    for (let s = 0; s < wlen; s += 5) {
+      g.quadraticCurveTo(
+        x + s + 2, y - 5 - Math.random() * 9,
+        x + s + 5, y + (Math.random() - 0.5) * 7);
+    }
+    g.stroke(); x += wlen + 14;
+  }
+});
+
+const wallTextTex = makeTexture(512, 256, (g, w, h) => {
+  g.clearRect(0, 0, w, h);
+  g.fillStyle = 'rgba(110,8,8,0.92)';
+  g.font = 'bold 64px Georgia';
+  g.textAlign = 'center';
+  const word = 'FORGIVE ME';
+  for (let i = 0; i < word.length; i++) {
+    const x = w / 2 + (i - word.length / 2 + 0.5) * 44;
+    const y = h / 2 + 20 + (Math.random() - 0.5) * 14;
+    g.save(); g.translate(x, y); g.rotate((Math.random() - 0.5) * 0.18);
+    g.fillText(word[i], 0, 0); g.restore();
+    if (Math.random() < 0.6) {
+      g.fillStyle = `rgba(90,6,6,${0.4 + Math.random() * 0.4})`;
+      g.fillRect(x - 4 + Math.random() * 8, y, 3, 18 + Math.random() * 55);
+      g.fillStyle = 'rgba(110,8,8,0.92)';
+    }
+  }
+});
+wallTextTex.generateMipmaps = false;
+wallTextTex.minFilter = THREE.LinearFilter;
+wallTextTex.wrapS = wallTextTex.wrapT = THREE.ClampToEdgeWrapping;
+
+/* ============================ MATERIALS ============================ */
+
+function surfMat(tex, rx, ry, opts = {}) {
+  const t = tex.clone(); t.needsUpdate = true; t.repeat.set(rx, ry);
+  const b = tex.clone(); b.needsUpdate = true; b.repeat.set(rx, ry);
+  return new THREE.MeshStandardMaterial({
+    map: t, bumpMap: b, bumpScale: opts.bump ?? 0.012,
+    roughness: opts.roughness ?? 0.92, metalness: 0.02, ...opts.extra });
+}
+const darkWood = new THREE.MeshStandardMaterial({ color: 0x1d1409, roughness: 0.85 });
+const trimMat  = new THREE.MeshStandardMaterial({ color: 0xa19c8c, roughness: 0.65 });  // painted trim
+const ironMat  = new THREE.MeshStandardMaterial({ color: 0x16151a, roughness: 0.6, metalness: 0.7 });
+
+/* ============================ LAYOUT / COLLISION ============================
+   L-shaped hall. Leg A: x in [-1.25, 1.25], z in [-16.5, 0].  Corner band at
+   z in [-16.5, -14].  Leg B runs west: x in [-10, 1.25], z in [-16.5, -14].
+   Room (bedroom): x in [-16.1, -10], z in [-18.4, -12.4].
+   Dark door opening: x = -10, z in [-15.75, -14.75].                         */
+
+const solids = [];
+const lamps = [];   // flickered pendants / sconces / the fluorescent (declared early: the dark door registers one)
+let lampFluoro = null;   // the fluorescent record, captured when the dark door is built
+function addSolid(minX, maxX, minZ, maxZ) {
+  const s = { minX, maxX, minZ, maxZ, disabled: false };
+  solids.push(s); return s;
+}
+const PLAYER_R = 0.3;
+function collides(x, z) {
+  for (const s of solids) {
+    if (s.disabled) continue;
+    if (x > s.minX - PLAYER_R && x < s.maxX + PLAYER_R &&
+        z > s.minZ - PLAYER_R && z < s.maxZ + PLAYER_R) return true;
+  }
+  return false;
+}
+
+function addBox(w, h, d, x, y, z, mat, opts = {}) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z);
+  m.castShadow = opts.cast ?? false;
+  m.receiveShadow = opts.receive ?? true;
+  scene.add(m);
+  if (opts.solid) addSolid(x - w / 2, x + w / 2, z - d / 2, z + d / 2);
+  return m;
+}
+function addFlat(w, d, x, y, z, mat, flip) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), mat);
+  m.rotation.x = flip ? Math.PI / 2 : -Math.PI / 2;
+  m.position.set(x, y, z);
+  m.receiveShadow = true;
+  scene.add(m);
+}
+
+/* waxed parquet — clearcoat gives the P.T. wet-sheen under the lamps */
+function parquetMat(rx, ry) {
+  const t = floorTex.clone(); t.needsUpdate = true; t.repeat.set(rx, ry);
+  const b = floorTex.clone(); b.needsUpdate = true; b.repeat.set(rx, ry);
+  return new THREE.MeshPhysicalMaterial({
+    map: t, bumpMap: b, bumpScale: 0.012,
+    roughness: 0.32, metalness: 0, clearcoat: 0.7, clearcoatRoughness: 0.18 });
+}
+/* leg A floor + leg B floor + room floor (texel density ~ hallway's old 2.2/2.6) */
+addFlat(2.6, 16.5, 0, 0, -8.25, parquetMat(2.2, 14));
+addFlat(8.7, 2.5, -5.65, 0, -15.25, parquetMat(7.4, 2.1));
+addFlat(6.1, 6.0, -13.05, 0, -15.4, parquetMat(5.2, 5.1));
+addFlat(2.6, 16.5, 0, 3, -8.25, surfMat(ceilingTex, 2, 12), true);
+addFlat(8.7, 2.5, -5.65, 3, -15.25, surfMat(ceilingTex, 6, 2), true);
+addFlat(6.1, 6.0, -13.05, 3, -15.4, surfMat(ceilingTex, 5, 5), true);
+
+/* walls */
+/* leg A west wall stops at the corner opening; east wall runs the whole way */
+addBox(0.1, 3, 14.0, -1.3, 1.5, -7.0, surfMat(wallpaperTex, 5.2, 1.1), { solid: true });
+addBox(0.1, 3, 16.5,  1.3, 1.5, -8.25, surfMat(wallpaperTex, 6.1, 1.1), { solid: true });
+addBox(2.8, 3, 0.1, 0, 1.5, 0.05, surfMat(wallpaperTex, 1, 1.1), { solid: true });
+/* south wall (the leg-A-facing end of the corridor), spans x in [-10, 1.3] */
+addBox(11.3, 3, 0.1, -4.35, 1.5, -16.55, surfMat(wallpaperTex, 4.2, 1.1), { solid: true });
+/* leg B north wall, x in [-10, -1.25] */
+addBox(8.75, 3, 0.1, -5.625, 1.5, -13.95, surfMat(wallpaperTex, 3.3, 1.1), { solid: true });
+
+/* leg B west end wall (x = -10) with the dark-door opening z in [-15.75, -14.75] */
+addBox(0.12, 3, 0.75, -10.05, 1.5, -14.375, surfMat(wallpaperTex, 0.3, 1.1), { solid: true });
+addBox(0.12, 3, 0.75, -10.05, 1.5, -16.125, surfMat(wallpaperTex, 0.3, 1.1), { solid: true });
+addBox(0.12, 0.8, 1.0, -10.05, 2.6, -15.25, surfMat(wallpaperTex, 0.4, 0.3));  // lintel above door
+
+/* room walls (interior x in [-16.1, -10], z in [-18.4, -12.4]) */
+addBox(0.1, 3, 6.0, -16.1, 1.5, -15.4, surfMat(wallpaperTex, 2.2, 1.1), { solid: true });  // west
+addBox(6.2, 3, 0.1, -13.05, 1.5, -18.45, surfMat(wallpaperTex, 2.3, 1.1), { solid: true }); // south
+addBox(6.2, 3, 0.1, -13.05, 1.5, -12.35, surfMat(wallpaperTex, 2.3, 1.1), { solid: true }); // north
+/* room east wall = the x=-10 wall shared with leg B, above/around the door */
+addBox(0.1, 3, 1.7, -10.0, 1.5, -13.25, surfMat(wallpaperTex, 0.65, 1.1), { solid: true });
+addBox(0.1, 3, 1.7, -10.0, 1.5, -17.55, surfMat(wallpaperTex, 0.65, 1.1), { solid: true });
+
+/* basement-pocket concrete: overlay thin panels on the last ~1.5m of leg B
+   (x in [-10, -8.5]) plus the leg-B end wall itself */
+addBox(1.5, 3, 0.02, -9.25, 1.5, -14.02, surfMat(concreteTex, 0.8, 1.6));  // north wall stretch
+addBox(1.5, 3, 0.02, -9.25, 1.5, -16.48, surfMat(concreteTex, 0.8, 1.6));  // south wall stretch
+addBox(0.02, 3, 0.75, -9.98, 1.5, -14.375, surfMat(concreteTex, 0.4, 1.6)); // end wall, above-door side
+addBox(0.02, 3, 0.75, -9.98, 1.5, -16.125, surfMat(concreteTex, 0.4, 1.6)); // end wall, below-door side
+addBox(0.02, 0.8, 1.0, -9.98, 2.6, -15.25, surfMat(concreteTex, 0.4, 0.4));  // over the door opening
+
+/* painted skirting boards — along every wall run */
+addBox(0.05, 0.18, 14.0, -1.245, 0.09, -7.0, trimMat);    // leg A west
+addBox(0.05, 0.18, 16.5,  1.245, 0.09, -8.25, trimMat);   // leg A east
+addBox(11.3, 0.18, 0.05, -4.35, 0.09, -16.49, trimMat);   // south wall
+addBox(8.75, 0.18, 0.05, -5.625, 0.09, -14.01, trimMat);  // leg B north
+addBox(0.05, 0.18, 6.0, -16.04, 0.09, -15.4, trimMat);    // room west
+addBox(6.2, 0.18, 0.05, -13.05, 0.09, -18.39, trimMat);   // room south
+addBox(6.2, 0.18, 0.05, -13.05, 0.09, -12.41, trimMat);   // room north
+
+/* chunky cornice — a main box plus a lip below it, along every wall run */
+function cornice(w, d, x, z) {
+  addBox(w, 0.10, d, x, 2.945, z, trimMat);                // main
+  addBox(w > d ? w : w * 0.6, 0.04, w > d ? d * 0.6 : d, x, 2.86, z, trimMat);  // lip
+}
+cornice(0.10, 14.0, -1.25, -7.0);     // leg A west
+cornice(0.10, 16.5,  1.25, -8.25);    // leg A east
+cornice(11.3, 0.10, -4.35, -16.5);    // south wall
+cornice(8.75, 0.10, -5.625, -14.0);   // leg B north
+cornice(0.10, 6.0, -16.04, -15.4);    // room west
+cornice(6.2, 0.10, -13.05, -18.4);    // room south
+cornice(6.2, 0.10, -13.05, -12.4);    // room north
+
+/* ============================ THE DARK DOOR ============================
+   the money shot at the end of leg B — a near-black 4-panel door in a
+   minimal dark frame, a cold fluorescent stuttering above it.            */
+
+/* thin dark frame (not white trim) around the opening */
+addBox(0.08, 2.32, 0.12, -10.0, 1.16, -14.7, darkWood);
+addBox(0.08, 2.32, 0.12, -10.0, 1.16, -15.8, darkWood);
+addBox(0.08, 0.10, 1.06, -10.0, 2.27, -15.25, darkWood);
+
+const doorHinge = new THREE.Group();
+doorHinge.position.set(-10, 0, -15.75);
+scene.add(doorHinge);
+/* panel spans the opening when closed: local z +0.5 reaches toward -14.75 */
+const doorPanel = new THREE.Mesh(new THREE.BoxGeometry(0.06, 2.2, 1.0),
+  new THREE.MeshStandardMaterial({ map: darkDoorTex, bumpMap: darkDoorTex.clone(), bumpScale: 0.02, roughness: 0.78 }));
+doorPanel.material.bumpMap.needsUpdate = true;
+doorPanel.position.set(0, 1.1, 0.5);
+doorPanel.castShadow = true;
+doorHinge.add(doorPanel);
+/* metal lever handle + keyhole plate on the leg-B side, near the opening edge */
+{
+  const plate = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.16, 0.06),
+    new THREE.MeshStandardMaterial({ color: 0x14151a, metalness: 0.85, roughness: 0.3 }));
+  plate.position.set(0.04, 1.05, 0.88); doorHinge.add(plate);
+  const leverMat = new THREE.MeshStandardMaterial({ color: 0x1a1b20, metalness: 0.85, roughness: 0.3 });
+  const lever = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.16, 10), leverMat);
+  lever.rotation.x = Math.PI / 2;            // horizontal, lying along z
+  lever.position.set(0.06, 1.05, 0.82); doorHinge.add(lever);
+  const keyplate = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.05, 0.035), leverMat);
+  keyplate.position.set(0.04, 0.92, 0.88); doorHinge.add(keyplate);
+}
+/* opens INTO the room (swings toward -x); closed angle ~0.10 (ajar) */
+const doorSolid = addSolid(-10.15, -9.95, -15.85, -14.65);
+let doorAngle = -0.10, doorTarget = -0.10, doorState = 'closed', doorRearmAt = Infinity;
+doorHinge.rotation.y = doorAngle;
+
+/* fluorescent tube housing, tube, and its cold pool of light */
+{
+  const housing = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.05, 0.85), ironMat);
+  housing.position.set(-9.93, 2.5, -15.25); housing.castShadow = true; scene.add(housing);
+  const tubeMat = new THREE.MeshStandardMaterial({
+    color: 0x222222, emissive: 0xeaf6ff, emissiveIntensity: 2.5 });
+  const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.78, 10), tubeMat);
+  tube.rotation.x = Math.PI / 2;             // horizontal along z
+  tube.position.set(-9.9, 2.45, -15.25); scene.add(tube);
+  const flLight = new THREE.PointLight(0xcfe8ff, 4, 5.5, 1.7);
+  flLight.position.set(-9.8, 2.42, -15.25);
+  flLight.castShadow = false;
+  scene.add(flLight);
+  lamps.push({ group: tube, light: flLight, bulbMat: tubeMat, base: 4, cur: 4, target: 4,
+               nextPick: 0, dropUntil: 0, swing: 0, fluoro: true, fluoroEmis: 2.5 });
+  lampFluoro = lamps[lamps.length - 1];
+}
+
+/* white sash window on the left wall, night behind it */
+{
+  const wg = new THREE.Group();
+  wg.position.set(-1.24, 0, -3.2);
+  scene.add(wg);
+  const pane = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 1.3),
+    new THREE.MeshBasicMaterial({ color: 0x0b0f17 }));
+  pane.rotation.y = Math.PI / 2;
+  pane.position.set(0.004, 1.5, 0);
+  wg.add(pane);
+  const f = (wd, hd, dd, x, y, z) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(wd, hd, dd), trimMat);
+    m.position.set(x, y, z); m.castShadow = true; wg.add(m);
+  };
+  f(0.05, 0.08, 1.16, 0.02, 2.19, 0);     // head
+  f(0.09, 0.07, 1.24, 0.04, 0.81, 0);     // protruding sill
+  f(0.05, 1.46, 0.08, 0.02, 1.5, -0.54);  // jambs
+  f(0.05, 1.46, 0.08, 0.02, 1.5,  0.54);
+  f(0.03, 1.3, 0.03, 0.015, 1.5, 0);      // mullion
+  f(0.03, 0.03, 1.0, 0.015, 1.93, 0);     // glazing bars
+  f(0.03, 0.03, 1.0, 0.015, 1.07, 0);
+}
+
+/* second sash window — on the south wall, facing +z down all of leg A */
+{
+  const wg = new THREE.Group();
+  wg.position.set(0, 0, -16.5);
+  scene.add(wg);
+  const pane = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 1.3),
+    new THREE.MeshBasicMaterial({ color: 0x0b0f17 }));
+  pane.position.set(0, 1.5, 0.004);
+  wg.add(pane);
+  const f = (wd, hd, dd, x, y, z) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(wd, hd, dd), trimMat);
+    m.position.set(x, y, z); m.castShadow = true; wg.add(m);
+  };
+  f(1.16, 0.08, 0.05, 0, 2.19, 0.02);     // head
+  f(1.24, 0.07, 0.09, 0, 0.81, 0.04);     // protruding sill
+  f(0.08, 1.46, 0.05, -0.54, 1.5, 0.02);  // jambs
+  f(0.08, 1.46, 0.05,  0.54, 1.5, 0.02);
+  f(0.03, 1.3, 0.03, 0, 1.5, 0.015);      // mullion
+  f(1.0, 0.03, 0.03, 0, 1.93, 0.015);     // glazing bars
+  f(1.0, 0.03, 0.03, 0, 1.07, 0.015);
+}
+
+/* white radiator below the south window */
+{
+  const rg = new THREE.Group();
+  rg.position.set(0, 0, -16.36);
+  scene.add(rg);
+  for (let i = 0; i < 10; i++) {
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.5, 0.07), trimMat);
+    fin.position.set(-0.45 + i * 0.1, 0.35, 0);
+    fin.castShadow = true; rg.add(fin);
+  }
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.04, 0.08), trimMat);
+  rail.position.set(0, 0.6, 0); rg.add(rail);
+  addSolid(-0.48, 0.48, -16.42, -16.3);
+}
+
+/* ============================ SET DRESSING ============================ */
+
+const lampShadeMat = new THREE.MeshStandardMaterial({ color: 0x241f18, roughness: 0.7, side: THREE.DoubleSide });
+function addLamp(x, z, base, swing) {
+  const g = new THREE.Group();
+  g.position.set(x, 3, z);
+  const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.4, 6), ironMat);
+  cord.position.y = -0.2; g.add(cord);
+  /* caged pendant — the bars throw barred shadows up the walls */
+  const top = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.02, 0.15), lampShadeMat);
+  top.position.y = -0.4; top.castShadow = true; g.add(top);
+  for (const [bx, bz] of [[-0.065, -0.065], [-0.065, 0.065], [0.065, -0.065], [0.065, 0.065]]) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.22, 0.012), lampShadeMat);
+    bar.position.set(bx, -0.51, bz); bar.castShadow = true; g.add(bar);
+  }
+  for (const r of [0, Math.PI / 2]) {
+    const rim = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.012, 0.012), lampShadeMat);
+    rim.rotation.y = r; rim.position.y = -0.62; rim.castShadow = true; g.add(rim);
+  }
+  const bulbMat = new THREE.MeshStandardMaterial({
+    color: 0x222222, emissive: 0xfff0d6, emissiveIntensity: 2.2 });
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.035, 10, 8), bulbMat);
+  bulb.position.y = -0.49; g.add(bulb);
+  const light = new THREE.PointLight(0xfff0d6, base, 10, 1.7);
+  light.position.y = -0.55;
+  light.castShadow = true;
+  light.shadow.mapSize.set(512, 512);
+  light.shadow.bias = -0.004;
+  g.add(light);
+  scene.add(g);
+  lamps.push({ group: g, light, bulbMat, base, cur: base, target: base,
+               nextPick: 0, dropUntil: 0, swing });
+  return lamps[lamps.length - 1];
+}
+/* boxy wall sconce — a bracket, a half-open shade, a bulb in it */
+function addSconce(x, z, rotY, base, opts = {}) {
+  const g = new THREE.Group();
+  g.position.set(x, 2.25, z);
+  g.rotation.y = rotY;
+  /* the lamp protrudes +x in local space; rotY aims it off the wall */
+  const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.16, 0.05), trimMat);
+  bracket.position.set(0.03, 0, 0); bracket.castShadow = true; g.add(bracket);
+  /* half-open boxy shade */
+  const shadeMat = new THREE.MeshStandardMaterial({ color: 0x20201a, roughness: 0.7, side: THREE.DoubleSide });
+  const shade = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.04, 0.13), shadeMat);
+  shade.position.set(0.13, 0.10, 0); shade.castShadow = true; g.add(shade);
+  for (const bz of [-0.06, 0.06]) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.12, 0.012), shadeMat);
+    wall.position.set(0.13, 0.04, bz); wall.castShadow = true; g.add(wall);
+  }
+  const bulbMat = new THREE.MeshStandardMaterial({
+    color: 0x222222, emissive: 0xfff0d6, emissiveIntensity: 2.2 });
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), bulbMat);
+  bulb.position.set(0.13, 0.02, 0); g.add(bulb);
+  const light = new THREE.PointLight(0xfff0d6, base, 8, 1.7);
+  light.position.set(0.15, 0.02, 0);
+  light.castShadow = !!opts.cast;
+  if (opts.cast) { light.shadow.mapSize.set(512, 512); light.shadow.bias = -0.004; }
+  g.add(light);
+  scene.add(g);
+  lamps.push({ group: g, light, bulbMat, base, cur: base, target: base,
+               nextPick: 0, dropUntil: 0, swing: 0 });
+  return lamps[lamps.length - 1];
+}
+
+/* the start-of-hall lamp skips shadows — GTAO grounds that end on its own
+   (each shadowed point light = six scene renders per frame) */
+addLamp(0, -3.5, 8, 0).light.castShadow = false;
+const doorLamp = addLamp(0, -9.5, 7.5, 0.06);
+
+/* two wall sconces (reference image 1's boxy lamps) */
+addSconce(-1.13, -6.5, 0, 5);                       // leg A west, faces +x, no shadow
+const sconceB = addSconce(-5.5, -14.13, -Math.PI / 2, 5.5, { cast: true });  // leg B north, drama light
+
+/* room bulb — bare */
+{
+  const g = new THREE.Group();
+  g.position.set(-13, 3, -15.4);
+  const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.5, 6), ironMat);
+  cord.position.y = -0.25; g.add(cord);
+  const bulbMat = new THREE.MeshStandardMaterial({
+    color: 0x222222, emissive: 0xffe6c2, emissiveIntensity: 1.8 });
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), bulbMat);
+  bulb.position.y = -0.52; g.add(bulb);
+  const light = new THREE.PointLight(0xffdfb6, 6, 9, 1.7);
+  light.position.y = -0.58;
+  light.castShadow = true;
+  light.shadow.mapSize.set(512, 512);
+  light.shadow.bias = -0.004;
+  g.add(light);
+  scene.add(g);
+  lamps.push({ group: g, light, bulbMat, base: 6, cur: 6, target: 6,
+               nextPick: 0, dropUntil: 0, swing: 0.04 });
+}
+
+scene.add(new THREE.HemisphereLight(0x272a2a, 0x0a0a0c, 0.45));
+
+/* murky framed pictures */
+function landscapeTexture() {
+  return makeTexture(200, 150, (g, w, h) => {
+    const sky = g.createLinearGradient(0, 0, 0, h * 0.7);
+    sky.addColorStop(0, '#1c2026'); sky.addColorStop(1, '#0d0f0c');
+    g.fillStyle = sky; g.fillRect(0, 0, w, h);
+    g.fillStyle = 'rgba(190,195,185,0.18)';               // smudged moon
+    g.beginPath(); g.arc(w * 0.7, h * 0.25, 9, 0, 7); g.fill();
+    g.fillStyle = '#070806';                              // hills
+    g.beginPath(); g.moveTo(0, h * 0.62);
+    g.bezierCurveTo(w * 0.3, h * 0.5, w * 0.55, h * 0.72, w, h * 0.55);
+    g.lineTo(w, h); g.lineTo(0, h); g.fill();
+    for (let i = 0; i < 120; i++) {
+      g.fillStyle = `rgba(0,0,0,${Math.random() * 0.2})`;
+      g.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+    }
+  });
+}
+/* a sepia family photograph — and someone has scratched the mother out */
+function familyPhotoTexture(scratched) {
+  return makeTexture(200, 150, (g, w, h) => {
+    g.fillStyle = '#b9a888'; g.fillRect(0, 0, w, h);      // aged albumen print
+    const bg = g.createLinearGradient(0, 0, 0, h);
+    bg.addColorStop(0, '#8d7c5e'); bg.addColorStop(1, '#6b5c42');
+    g.fillStyle = bg; g.fillRect(10, 10, w - 20, h - 20);
+    g.strokeStyle = 'rgba(60,48,30,0.5)'; g.lineWidth = 1.5;
+    g.strokeRect(18, 16, 36, 48);                         // a window behind them
+    g.beginPath(); g.moveTo(36, 16); g.lineTo(36, 64); g.stroke();
+    function figure(cx, cy, s, dress) {
+      g.fillStyle = '#241c12';
+      g.beginPath(); g.ellipse(cx, cy + 30 * s, 16 * s, 24 * s, 0, Math.PI, 0); g.fill();
+      if (dress) {
+        g.beginPath(); g.moveTo(cx - 13 * s, cy + 40 * s); g.lineTo(cx + 13 * s, cy + 40 * s);
+        g.lineTo(cx + 19 * s, cy + 76 * s); g.lineTo(cx - 19 * s, cy + 76 * s); g.fill();
+      }
+      g.fillStyle = '#cdbb9a';
+      g.beginPath(); g.ellipse(cx, cy, 9 * s, 11 * s, 0, 0, 7); g.fill();
+      g.fillStyle = '#1c150e';
+      g.beginPath(); g.ellipse(cx, cy - 7 * s, 9.5 * s, 6 * s, 0, Math.PI, 0, true); g.fill();
+      g.fillRect(cx - 4.5 * s, cy - 2 * s, 2.2 * s, 2.4 * s);
+      g.fillRect(cx + 2.3 * s, cy - 2 * s, 2.2 * s, 2.4 * s);
+      g.fillRect(cx - 2.5 * s, cy + 5.5 * s, 5 * s, 1.3 * s);   // nobody smiles
+    }
+    figure(w * 0.32, 52, 1.05, false);                    // father
+    figure(w * 0.55, 50, 1.0, true);                      // mother
+    figure(w * 0.74, 78, 0.6, false);                     // child
+    if (scratched) {                                      // her face, gone
+      g.strokeStyle = 'rgba(238,230,210,0.9)';
+      for (let i = 0; i < 26; i++) {
+        g.lineWidth = 0.8 + Math.random() * 1.6;
+        g.beginPath();
+        g.moveTo(w * 0.55 - 13 + Math.random() * 7, 36 + Math.random() * 9);
+        g.lineTo(w * 0.55 + 5 + Math.random() * 9, 58 + Math.random() * 9);
+        g.stroke();
+      }
+    }
+    const vg = g.createRadialGradient(w / 2, h / 2, h * 0.3, w / 2, h / 2, w * 0.72);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(40,28,14,0.45)');
+    g.fillStyle = vg; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 200; i++) {
+      g.fillStyle = `rgba(${Math.random() < 0.5 ? '255,248,230' : '40,30,16'},${Math.random() * 0.12})`;
+      g.fillRect(Math.random() * w, Math.random() * h, 1.5, 1.5);
+    }
+  });
+}
+
+/* a house at night, painted by someone who was afraid of it */
+function paintingHouseTexture() {
+  return makeTexture(220, 160, (g, w, h) => {
+    const sky = g.createLinearGradient(0, 0, 0, h * 0.75);
+    sky.addColorStop(0, '#2c3038'); sky.addColorStop(1, '#13140f');
+    g.fillStyle = sky; g.fillRect(0, 0, w, h);
+    const mg = g.createRadialGradient(w * 0.78, h * 0.2, 2, w * 0.78, h * 0.2, 26);
+    mg.addColorStop(0, 'rgba(220,222,205,0.85)'); mg.addColorStop(0.3, 'rgba(220,222,205,0.25)');
+    mg.addColorStop(1, 'rgba(220,222,205,0)');
+    g.fillStyle = mg; g.beginPath(); g.arc(w * 0.78, h * 0.2, 26, 0, 7); g.fill();
+    g.fillStyle = '#0d0e0a';                              // ground
+    g.fillRect(0, h * 0.68, w, h * 0.32);
+    g.fillStyle = '#15120c';                              // the house
+    g.fillRect(w * 0.26, h * 0.4, w * 0.34, h * 0.3);
+    g.beginPath(); g.moveTo(w * 0.22, h * 0.42); g.lineTo(w * 0.43, h * 0.22);
+    g.lineTo(w * 0.64, h * 0.42); g.fill();
+    g.fillRect(w * 0.52, h * 0.26, w * 0.04, h * 0.12);   // chimney
+    g.fillStyle = '#d8c27a';                              // one window lit. upstairs.
+    g.fillRect(w * 0.41, h * 0.45, w * 0.05, h * 0.07);
+    g.fillStyle = '#070705';
+    g.fillRect(w * 0.33, h * 0.56, w * 0.05, h * 0.13);   // dark door
+    g.strokeStyle = '#1a160e'; g.lineWidth = 2;           // fence stumps
+    for (let x = w * 0.06; x < w * 0.96; x += w * 0.07) {
+      g.beginPath(); g.moveTo(x, h * 0.72); g.lineTo(x, h * 0.65 + Math.random() * 6); g.stroke();
+    }
+    for (let i = 0; i < 160; i++) {
+      g.fillStyle = `rgba(0,0,0,${Math.random() * 0.18})`;
+      g.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+    }
+  });
+}
+
+/* a bare tree on a hill, and three birds leaving */
+function paintingTreeTexture() {
+  return makeTexture(160, 220, (g, w, h) => {
+    const sky = g.createLinearGradient(0, 0, 0, h);
+    sky.addColorStop(0, '#23262b'); sky.addColorStop(1, '#0e0f0c');
+    g.fillStyle = sky; g.fillRect(0, 0, w, h);
+    g.fillStyle = '#0c0d09';                              // the hill
+    g.beginPath(); g.ellipse(w / 2, h * 1.05, w * 0.85, h * 0.38, 0, Math.PI, 0); g.fill();
+    g.strokeStyle = '#0a0905'; g.lineCap = 'round';       // the tree
+    function branch(x, y, a, len, lw) {
+      if (lw < 0.5) return;
+      const x2 = x + Math.cos(a) * len, y2 = y + Math.sin(a) * len;
+      g.lineWidth = lw;
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x2, y2); g.stroke();
+      branch(x2, y2, a - 0.45 - Math.random() * 0.25, len * 0.66, lw * 0.62);
+      branch(x2, y2, a + 0.4 + Math.random() * 0.3, len * 0.62, lw * 0.62);
+    }
+    branch(w * 0.52, h * 0.78, -Math.PI / 2, h * 0.2, 5);
+    g.strokeStyle = '#1b1d20'; g.lineWidth = 1.2;         // birds, going
+    for (const [bx, by] of [[w * 0.7, h * 0.2], [w * 0.78, h * 0.16], [w * 0.74, h * 0.26]]) {
+      g.beginPath(); g.moveTo(bx - 4, by); g.quadraticCurveTo(bx, by - 4, bx + 4, by); g.stroke();
+    }
+    for (let i = 0; i < 140; i++) {
+      g.fillStyle = `rgba(0,0,0,${Math.random() * 0.16})`;
+      g.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+    }
+  });
+}
+
+/* a real print: aged, dimmed, occasionally defaced */
+function photoTexture(file, scratch) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 4;
+  const g0 = c.getContext('2d');
+  g0.fillStyle = '#171410'; g0.fillRect(0, 0, 4, 4);     // dark until the print loads
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = MAX_ANISO;
+  const img = new Image();
+  img.onload = () => {
+    c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d');
+    g.filter = 'saturate(0.6) brightness(0.85) contrast(0.95)';
+    g.drawImage(img, 0, 0);
+    g.filter = 'none';
+    if (scratch) {                                        // someone took something sharp to it
+      const cx = scratch.x * c.width, cy = scratch.y * c.height, rad = scratch.r * c.height;
+      for (let i = 0; i < 34; i++) {
+        const a = Math.random() * Math.PI - Math.PI / 2;
+        const lx = (Math.random() - 0.5) * rad * 0.9, ly = (Math.random() - 0.5) * rad * 0.9;
+        const len = rad * (0.8 + Math.random() * 0.9);
+        g.strokeStyle = Math.random() < 0.75
+          ? `rgba(236,229,212,${0.55 + Math.random() * 0.4})`
+          : `rgba(30,24,16,${0.5 + Math.random() * 0.4})`;
+        g.lineWidth = 1 + Math.random() * 2.5;
+        g.beginPath();
+        g.moveTo(cx + lx - Math.cos(a) * len / 2, cy + ly - Math.sin(a) * len / 2);
+        g.lineTo(cx + lx + Math.cos(a) * len / 2, cy + ly + Math.sin(a) * len / 2);
+        g.stroke();
+      }
+    }
+    const vg = g.createRadialGradient(c.width / 2, c.height / 2, c.height * 0.35,
+                                      c.width / 2, c.height / 2, c.width * 0.75);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(20,14,8,0.4)');
+    g.fillStyle = vg; g.fillRect(0, 0, c.width, c.height);
+    t.dispose();          // GPU storage is immutable — force a fresh allocation at the new size
+    t.needsUpdate = true;
+  };
+  img.src = './photos/' + encodeURIComponent(file);
+  return t;
+}
+
+function addPicture(x, z, rotY, crook, tex, pw = 0.5, ph = 0.65, y = 1.65) {
+  const g = new THREE.Group();
+  g.position.set(x, y, z);
+  g.rotation.y = rotY;
+  g.rotation.z = crook;
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(pw, ph, 0.035), darkWood);
+  frame.castShadow = true; g.add(frame);
+  const pic = new THREE.Mesh(new THREE.PlaneGeometry(pw - 0.08, ph - 0.09),
+    new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
+  pic.position.z = 0.02; g.add(pic);
+  scene.add(g);
+}
+/* leg A west wall — a big dark painting plus a small one */
+/* real prints from /photos — the house remembers real people now */
+const PHOTOS = {
+  couple: 'port-morien-digital-archive-4iNhkakQ6kQ-unsplash.jpg',   // an unsmiling couple
+  woman:  'smithsonian-ky5_VsML4Xc-unsplash.jpg',                   // her
+  riders: 'the-cleveland-museum-of-art-1KgWdfJ963w-unsplash.jpg',   // riders by a river
+  bridge: 'art-institute-of-chicago-__32EkbT-9g-unsplash.jpg',      // a bridge, long ago
+  seance: 'museum-of-new-zealand-te-papa-tongarewa-pPbhAyto4hI-unsplash.jpg', // a spirit photograph
+};
+addPicture(-1.23, -7.8,  Math.PI / 2, -0.02, photoTexture(PHOTOS.couple), 0.72, 1.1, 1.55);
+addPicture(-1.23, -11.5, Math.PI / 2, 0.03, photoTexture(PHOTOS.woman), 0.46, 0.6);
+addPicture(-1.23, -9.6,  Math.PI / 2, 0.03, photoTexture(PHOTOS.riders), 0.42, 0.32, 1.6);
+/* leg A east wall */
+addPicture( 1.23, -5.2, -Math.PI / 2, 0.04, photoTexture(PHOTOS.bridge), 0.6, 0.46);
+addPicture( 1.23, -12.8, -Math.PI / 2, -0.03,                       // her again. ruined.
+  photoTexture(PHOTOS.woman, { x: 0.47, y: 0.52, r: 0.26 }), 0.5, 0.65);
+addPicture( 1.23, -9.9, -Math.PI / 2, 0.05, photoTexture(PHOTOS.seance), 0.74, 0.5, 1.75);  // over the sideboard
+/* the same wedding print twice — one of them has been attacked */
+addPicture( 1.23, -7.0, -Math.PI / 2, 0.02, photoTexture(PHOTOS.couple), 0.3, 0.46, 1.86);
+addPicture( 1.23, -7.05, -Math.PI / 2, -0.04,
+  photoTexture(PHOTOS.couple, { x: 0.655, y: 0.16, r: 0.07 }), 0.3, 0.46, 1.36);
+/* leg B north wall — frames face into the corridor (-z), so rotY = PI */
+addPicture(-4.2, -13.94, Math.PI, 0.03, photoTexture(PHOTOS.riders), 0.7, 0.52);
+addPicture(-7.2, -13.94, Math.PI, -0.04, photoTexture(PHOTOS.couple), 0.46, 0.7);
+addPicture(-3.0, -13.94, Math.PI, -0.02, photoTexture(PHOTOS.bridge), 0.42, 0.32, 1.62);
+
+/* pencil scrawl on the left wall */
+{
+  const scrawl = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 0.27),
+    new THREE.MeshBasicMaterial({ map: scrawlTex, transparent: true, opacity: 0.9 }));
+  scrawlTex.generateMipmaps = false; scrawlTex.minFilter = THREE.LinearFilter;
+  scrawl.rotation.y = Math.PI / 2;
+  scrawl.position.set(-1.243, 1.42, -5.0);
+  scene.add(scrawl);
+  /* a second scrawl on leg B north wall, facing into the corridor (-z) */
+  const scrawl2 = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 0.27),
+    new THREE.MeshBasicMaterial({ map: scrawlTex, transparent: true, opacity: 0.9 }));
+  scrawl2.rotation.y = Math.PI;
+  scrawl2.position.set(-6.8, 1.45, -13.94);
+  scene.add(scrawl2);
+}
+
+/* sideboard with bottles and a dead radio */
+addBox(0.38, 0.8, 1.15, 1.05, 0.4, -9.9, darkWood, { cast: true, solid: true });
+addBox(0.42, 0.03, 1.22, 1.05, 0.815, -9.9, darkWood, { cast: true });
+{
+  const brass = new THREE.MeshStandardMaterial({ color: 0x6a5524, metalness: 0.8, roughness: 0.4 });
+  for (const kz of [-10.18, -10.0, -9.8, -9.62]) {
+    const kn = new THREE.Mesh(new THREE.SphereGeometry(0.012, 8, 6), brass);
+    kn.position.set(0.855, 0.52, kz);
+    scene.add(kn);
+  }
+}
+addBox(0.12, 0.15, 0.28, 1.06, 0.905, -10.18, ironMat, { cast: true });
+{
+  const glass = new THREE.MeshStandardMaterial({ color: 0x14271c, roughness: 0.15, metalness: 0.1 });
+  for (const [bz, bh] of [[-9.7, 0.22], [-9.6, 0.15], [-9.79, 0.18]]) {
+    const b = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, bh, 10), glass);
+    b.position.set(1.05, 0.83 + bh / 2, bz);
+    b.castShadow = true;
+    scene.add(b);
+  }
+}
+
+/* potted plant in the leg B corner, near the dark door */
+{
+  const g = new THREE.Group();
+  g.position.set(-9.35, 0, -16.15);
+  const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.085, 0.2, 12),
+    new THREE.MeshStandardMaterial({ color: 0x35201a, roughness: 0.9 }));
+  pot.position.y = 0.1; pot.castShadow = true; g.add(pot);
+  const leafMat = new THREE.MeshStandardMaterial({ color: 0x16240f, roughness: 0.85, side: THREE.DoubleSide });
+  for (let i = 0; i < 11; i++) {
+    const a = (i / 11) * Math.PI * 2 + Math.random() * 0.5;
+    const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.5 + Math.random() * 0.3, 5), leafMat);
+    leaf.position.set(Math.cos(a) * 0.05, 0.42, Math.sin(a) * 0.05);
+    leaf.rotation.set(Math.sin(a) * (0.5 + Math.random() * 0.4), 0, -Math.cos(a) * (0.5 + Math.random() * 0.4));
+    leaf.castShadow = true;
+    g.add(leaf);
+  }
+  scene.add(g);
+  addSolid(-9.5, -9.2, -16.3, -16.0);
+}
+
+/* room: iron bed + dresser */
+{
+  const bx = -14.8, bz = -17.2;
+  addBox(1.0, 0.08, 2.0, bx, 0.34, bz, ironMat, { cast: true });
+  addBox(0.95, 0.16, 1.9, bx, 0.46, bz,
+    new THREE.MeshStandardMaterial({ color: 0x5d574c, roughness: 1 }), { cast: true });
+  for (const [px2, pz2] of [[bx - 0.47, bz - 0.95], [bx + 0.47, bz - 0.95],
+                            [bx - 0.47, bz + 0.95], [bx + 0.47, bz + 0.95]])
+    addBox(0.05, 0.85, 0.05, px2, 0.425, pz2, ironMat, { cast: true });
+  addSolid(bx - 0.55, bx + 0.55, bz - 1.05, bz + 1.05);
+}
+addBox(0.9, 1.1, 0.45, -11, 0.55, -13.2, darkWood, { cast: true, solid: true });
+
+/* wall text — appears after the scare, on the room's west wall (faces +x) */
+const wallText = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 1.3),
+  new THREE.MeshBasicMaterial({ map: wallTextTex, transparent: true }));
+wallText.rotation.y = Math.PI / 2;
+wallText.position.set(-16.04, 1.7, -15.4);
+wallText.visible = false;
+scene.add(wallText);
+
+/* ============================ LISA ============================
+   Mixamo "Zombiegirl W Kurniawan" + animation clips from /zombie-pack.
+   The wrapper group is what the game logic positions and aims.        */
+
+const lisa = new THREE.Group();
+lisa.visible = false;
+scene.add(lisa);
+const scareLight = new THREE.PointLight(0xff1d1d, 0, 7, 1.6);
+scareLight.position.set(0, 1.25, 0.6);   // in front of her, lighting the face from below
+lisa.add(scareLight);
+
+let lisaMixer = null, lisaCurrent = null;
+const lisaActions = {};
+function playLisa(name, fade = 0.12) {
+  const a = lisaActions[name];
+  if (!a || lisaCurrent === a) return;
+  a.reset().fadeIn(fade).play();
+  if (lisaCurrent) lisaCurrent.fadeOut(fade);
+  lisaCurrent = a;
+}
+
+/* Turn the zombie into Lisa: bleach the textures to a pale spectre,
+   keep the hair dark, and dress her in a stained floor-length nightgown. */
+function ghostifyMaterial(m) {
+  /* the hair cards are the only transparent materials on this model */
+  const isHair = m.transparent || /hair/i.test(m.name || '');
+  if (m.map && m.map.image) {
+    const img = m.map.image;
+    const c = document.createElement('canvas');
+    c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d');
+    g.filter = isHair
+      ? 'saturate(0.15) brightness(0.45)'
+      : 'saturate(0.12) brightness(1.4) contrast(0.9)';
+    g.drawImage(img, 0, 0);
+    g.filter = 'none';
+    if (!isHair) {
+      g.fillStyle = 'rgba(196,203,206,0.16)';             // cold mortuary wash
+      g.fillRect(0, 0, c.width, c.height);
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = m.map.colorSpace;
+    t.flipY = m.map.flipY;
+    t.wrapS = m.map.wrapS; t.wrapT = m.map.wrapT;
+    m.map = t;
+  }
+  if (m.color) m.color.set(isHair ? 0x2e2a26 : 0xe8eaec);
+  if ('shininess' in m) m.shininess = 5;
+  m.needsUpdate = true;
+}
+
+/* FBXLoader assigns texture images asynchronously — wait until the maps are
+   actually decoded before bleaching them */
+function ghostifyWhenReady(char) {
+  const mats = new Set();
+  char.traverse(o => {
+    if (o.isMesh) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => mats.add(m));
+  });
+  let tries = 0;
+  const timer = setInterval(() => {
+    tries++;
+    const ready = [...mats].every(m => !m.map || (m.map.image && m.map.image.width > 0));
+    if ((ready && tries > 2) || tries > 25) {
+      clearInterval(timer);
+      mats.forEach(ghostifyMaterial);
+    }
+  }, 200);
+}
+
+const gownTex = makeTexture(256, 512, (g, w, h) => {
+  g.fillStyle = '#b6b0a2'; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 90; i++) {                          // stains running down
+    g.fillStyle = `rgba(96,84,66,${0.04 + Math.random() * 0.12})`;
+    g.fillRect(Math.random() * w, Math.random() * h, 2 + Math.random() * 8, 30 + Math.random() * 160);
+  }
+  for (let i = 0; i < 120; i++) {                         // blotches, heavier low down
+    g.fillStyle = `rgba(70,58,44,${0.04 + Math.random() * 0.12})`;
+    g.beginPath();
+    g.ellipse(Math.random() * w, h * (0.3 + Math.random() * 0.7),
+      4 + Math.random() * 20, 3 + Math.random() * 14, Math.random(), 0, 7);
+    g.fill();
+  }
+  const grad = g.createLinearGradient(0, h * 0.55, 0, h); // filthy hem (v=0 at bottom)
+  grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, 'rgba(30,22,14,0.5)');
+  g.fillStyle = grad; g.fillRect(0, 0, w, h);
+});
+gownTex.wrapT = THREE.ClampToEdgeWrapping;
+
+function buildGown() {
+  const pts = [
+    [0.34, 0.00], [0.31, 0.20], [0.285, 0.50], [0.27, 0.75],
+    [0.265, 0.95], [0.245, 1.10], [0.215, 1.22], [0.185, 1.30],
+  ].map(p => new THREE.Vector2(p[0], p[1]));
+  const geo = new THREE.LatheGeometry(pts, 26);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    let vx = pos.getX(i), vy = pos.getY(i), vz = pos.getZ(i);
+    if (vy < 0.22) {                                      // ragged hem
+      const a = Math.atan2(vz, vx);
+      const k = 1 + 0.06 * (Math.sin(a * 7.3) * 0.6 + Math.sin(a * 13.1 + 1.7) * 0.4) * (0.22 - vy) / 0.22;
+      vx *= k; vz *= k;
+    }
+    if (vz > 0 && vy > 0.7 && vy < 1.15) {                // she is carrying
+      vz *= 1 + 0.38 * Math.exp(-Math.pow((vy - 0.92) / 0.14, 2));
+    }
+    pos.setXYZ(i, vx, vy, vz);
+  }
+  geo.computeVertexNormals();
+  const gown = new THREE.Mesh(geo,
+    new THREE.MeshStandardMaterial({ map: gownTex, roughness: 0.95 }));
+  gown.castShadow = true;
+  return gown;
+}
+
+const fbxLoader = new FBXLoader();
+(async () => {
+  const char = await fbxLoader.loadAsync('./zombie-pack/' + encodeURIComponent('Zombiegirl W Kurniawan.fbx'));
+  /* Mixamo exports in cm; normalise her height to ~1.9m */
+  const size = new THREE.Box3().setFromObject(char).getSize(new THREE.Vector3());
+  char.scale.setScalar(1.9 / size.y);
+  char.traverse(o => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.frustumCulled = false;          // skinned bounds lie; never let her vanish
+    }
+  });
+  ghostifyWhenReady(char);
+  /* her legs live inside the gown now — collapse them so they can't clip through */
+  char.traverse(o => { if (o.isBone && /UpLeg/i.test(o.name)) o.scale.setScalar(0.001); });
+  /* dark hair, swept up — attached to the head bone so it rides every animation */
+  let headBone = null;
+  char.traverse(o => { if (o.isBone && /head$/i.test(o.name) && !headBone) headBone = o; });
+  if (headBone) {
+    /* bones carry the FBX cm→m scale, so size the hair in bone-local units */
+    const ws = new THREE.Vector3();
+    headBone.getWorldScale(ws);
+    const U = 1 / ws.x;                                   // bone-local units per metre
+    const hairM = new THREE.MeshStandardMaterial({ color: 0x141009, roughness: 1 });
+    const mass = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 10), hairM);
+    mass.scale.set(0.11 * U, 0.13 * U, 0.115 * U);
+    mass.position.set(0, 0.075 * U, -0.02 * U);
+    mass.castShadow = true;
+    headBone.add(mass);
+    const bun = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), hairM);
+    bun.scale.setScalar(0.06 * U);
+    bun.position.set(0, 0.16 * U, -0.055 * U);
+    bun.castShadow = true;
+    headBone.add(bun);
+  }
+  lisa.add(char);
+  lisa.add(buildGown());
+  lisaMixer = new THREE.AnimationMixer(char);
+  const wanted = { idle: 'zombie idle', scream: 'zombie scream', walk: 'zombie walk' };
+  for (const [key, file] of Object.entries(wanted)) {
+    const anim = await fbxLoader.loadAsync('./zombie-pack/' + encodeURIComponent(file + '.fbx'));
+    const clip = anim.animations[0];
+    /* strip root translation (game code owns her position) and scale tracks
+       (so the collapsed legs stay collapsed) */
+    clip.tracks = clip.tracks.filter(t =>
+      !t.name.endsWith('Hips.position') && !t.name.endsWith('.scale'));
+    lisaActions[key] = lisaMixer.clipAction(clip);
+  }
+  lisaActions.scream.timeScale = 1.5;   // the lunge window is short
+  playLisa('idle');
+})().catch(e => console.error('Lisa failed to load:', e));
+
+/* ============================ AUDIO (all synthesized) ============================ */
+
+let AC = null, master = null, verb = null, noiseBuf = null, riserGain = null, humGain = null, murGain = null;
+let nextBeat = 0, beatHeavy = true;
+
+function noiseSource() {
+  const s = AC.createBufferSource();
+  s.buffer = noiseBuf; s.loop = true;
+  return s;
+}
+/* connect a node to the master bus with a reverb send */
+function route(node, wet = 0.25) {
+  node.connect(master);
+  if (wet > 0 && verb) {
+    const g = AC.createGain(); g.gain.value = wet;
+    node.connect(g); g.connect(verb);
+  }
+}
+
+function initAudio() {
+  if (AC) { AC.resume(); return; }
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  const comp = AC.createDynamicsCompressor();
+  comp.threshold.value = -18; comp.ratio.value = 8;
+  comp.connect(AC.destination);
+  master = AC.createGain(); master.gain.value = 0.85;
+  master.connect(comp);
+
+  noiseBuf = AC.createBuffer(1, AC.sampleRate * 2, AC.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+
+  /* convolution reverb — a procedurally generated decaying-noise impulse */
+  const irLen = (AC.sampleRate * 1.8) | 0;
+  const ir = AC.createBuffer(2, irLen, AC.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const cd = ir.getChannelData(ch);
+    let lp = 0;
+    for (let i = 0; i < irLen; i++) {
+      const decay = Math.pow(1 - i / irLen, 2.6);
+      lp += 0.25 * ((Math.random() * 2 - 1) - lp);        // darken the tail
+      cd[i] = lp * decay;
+    }
+  }
+  verb = AC.createConvolver(); verb.buffer = ir;
+  const verbGain = AC.createGain(); verbGain.gain.value = 0.5;
+  verb.connect(verbGain); verbGain.connect(master);
+
+  /* low drone — detuned cluster through a dark filter */
+  const droneGain = AC.createGain(); droneGain.gain.value = 0.045;
+  const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 160;
+  lp.connect(droneGain); route(droneGain, 0.6);
+  for (const f of [48, 48.6, 72.2]) {
+    const o = AC.createOscillator(); o.type = 'triangle'; o.frequency.value = f;
+    const og = AC.createGain(); og.gain.value = f > 60 ? 0.4 : 1;
+    o.connect(og); og.connect(lp); o.start();
+  }
+  const lfo = AC.createOscillator(); lfo.frequency.value = 0.07;
+  const lfoG = AC.createGain(); lfoG.gain.value = 0.016;
+  lfo.connect(lfoG); lfoG.connect(droneGain.gain); lfo.start();
+
+  /* room tone */
+  const hiss = noiseSource();
+  const hlp = AC.createBiquadFilter(); hlp.type = 'lowpass'; hlp.frequency.value = 380;
+  const hg = AC.createGain(); hg.gain.value = 0.012;
+  hiss.connect(hlp); hlp.connect(hg); route(hg, 0.3); hiss.start();
+
+  /* riser — gain driven per-frame on approach */
+  const rn = noiseSource();
+  const rbp = AC.createBiquadFilter(); rbp.type = 'bandpass';
+  rbp.frequency.value = 900; rbp.Q.value = 1.2;
+  riserGain = AC.createGain(); riserGain.gain.value = 0;
+  rn.connect(rbp); rbp.connect(riserGain); route(riserGain, 0.4); rn.start();
+
+  /* fluorescent hum near the dark door — two mains-ish tones, driven by proximity */
+  humGain = AC.createGain(); humGain.gain.value = 0;
+  for (const [f, gv] of [[100, 0.5], [120, 0.25]]) {
+    const o = AC.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+    const og = AC.createGain(); og.gain.value = gv;
+    o.connect(og); og.connect(humGain); o.start();
+  }
+  route(humGain, 0.3);
+
+  /* the dead radio murmurs, if you stand close enough to hear it */
+  murGain = AC.createGain(); murGain.gain.value = 0;
+  const mur = noiseSource();
+  const mf1 = AC.createBiquadFilter(); mf1.type = 'bandpass'; mf1.frequency.value = 520; mf1.Q.value = 4;
+  const mf2 = AC.createBiquadFilter(); mf2.type = 'bandpass'; mf2.frequency.value = 1350; mf2.Q.value = 5;
+  const am = AC.createGain(); am.gain.value = 0.5;        // syllable-rate amplitude wobble
+  const syl = AC.createOscillator(); syl.frequency.value = 3.3;
+  const sylG = AC.createGain(); sylG.gain.value = 0.45;
+  syl.connect(sylG); sylG.connect(am.gain); syl.start();
+  const wander = AC.createOscillator(); wander.frequency.value = 0.31;  // vowels drifting
+  const wanderG = AC.createGain(); wanderG.gain.value = 180;
+  wander.connect(wanderG); wanderG.connect(mf2.frequency); wander.start();
+  mur.connect(mf1); mur.connect(mf2);
+  mf1.connect(am); mf2.connect(am);
+  am.connect(murGain);
+  route(murGain, 0.25);
+  mur.start();
+}
+
+function footstep() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const heel = noiseSource();
+  const hf = AC.createBiquadFilter(); hf.type = 'lowpass';
+  hf.frequency.value = 170 + Math.random() * 60;
+  const hg = AC.createGain();
+  hg.gain.setValueAtTime(0.2 + Math.random() * 0.06, t);
+  hg.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+  heel.connect(hf); hf.connect(hg); route(hg, 0.35);
+  heel.start(t); heel.stop(t + 0.1);
+  const toe = noiseSource();                              // toe lands ~70ms later
+  const tf = AC.createBiquadFilter(); tf.type = 'lowpass';
+  tf.frequency.value = 320 + Math.random() * 120;
+  const tg = AC.createGain();
+  tg.gain.setValueAtTime(0.0001, t);
+  tg.gain.setValueAtTime(0.09 + Math.random() * 0.04, t + 0.07);
+  tg.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+  toe.connect(tf); tf.connect(tg); route(tg, 0.35);
+  toe.start(t); toe.stop(t + 0.15);
+  const o = AC.createOscillator();                        // wood body resonance
+  o.frequency.value = 95 + Math.random() * 30;
+  const og = AC.createGain();
+  og.gain.setValueAtTime(0.06, t);
+  og.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  o.connect(og); route(og, 0.3); o.start(t); o.stop(t + 0.14);
+}
+
+function houseCreak() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const n = noiseSource();
+  const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 9;
+  bp.frequency.setValueAtTime(260 + Math.random() * 160, t);
+  bp.frequency.exponentialRampToValueAtTime(80 + Math.random() * 60, t + 0.7);
+  const g = AC.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.05, t + 0.12);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.8);
+  n.connect(bp); bp.connect(g); route(g, 0.7);
+  n.start(t); n.stop(t + 0.9);
+}
+
+function doorCreak() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(); o.type = 'sawtooth';
+  o.frequency.setValueAtTime(95, t);
+  o.frequency.linearRampToValueAtTime(170, t + 0.9);
+  o.frequency.linearRampToValueAtTime(70, t + 2.1);
+  const wob = AC.createOscillator(); wob.frequency.value = 7.3;
+  const wobG = AC.createGain(); wobG.gain.value = 14;
+  wob.connect(wobG); wobG.connect(o.frequency); wob.start(t); wob.stop(t + 2.3);
+  const bp = AC.createBiquadFilter(); bp.type = 'bandpass';
+  bp.frequency.value = 420; bp.Q.value = 4;
+  const g = AC.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.05, t + 0.25);
+  g.gain.setValueAtTime(0.05, t + 1.7);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 2.3);
+  o.connect(bp); bp.connect(g); route(g, 0.5);
+  o.start(t); o.stop(t + 2.4);
+}
+
+function heartThump(heavy) {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(); o.frequency.setValueAtTime(55, t);
+  o.frequency.exponentialRampToValueAtTime(35, t + 0.1);
+  const g = AC.createGain();
+  g.gain.setValueAtTime(heavy ? 0.3 : 0.18, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+  o.connect(g); route(g, 0);
+  o.start(t); o.stop(t + 0.18);
+}
+
+function doorSlam() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const n = noiseSource();
+  const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 140;
+  const g = AC.createGain();
+  g.gain.setValueAtTime(0.85, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+  n.connect(f); f.connect(g); route(g, 0.6); n.start(t); n.stop(t + 0.45);
+  const o = AC.createOscillator(); o.frequency.setValueAtTime(42, t);
+  o.frequency.exponentialRampToValueAtTime(28, t + 0.3);
+  const og = AC.createGain();
+  og.gain.setValueAtTime(0.5, t);
+  og.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+  o.connect(og); route(og, 0.4); o.start(t); o.stop(t + 0.55);
+}
+
+function subThump() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(); o.frequency.setValueAtTime(48, t);
+  o.frequency.exponentialRampToValueAtTime(24, t + 0.5);
+  const g = AC.createGain();
+  g.gain.setValueAtTime(0.6, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
+  o.connect(g); route(g, 0.3); o.start(t); o.stop(t + 0.65);
+}
+
+/* a distant woman, sobbing — somewhere past the door */
+function sob() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(); o.type = 'triangle';
+  o.frequency.setValueAtTime(355, t);
+  o.frequency.linearRampToValueAtTime(285, t + 1.5);
+  const vib = AC.createOscillator(); vib.frequency.value = 5.7;
+  const vg = AC.createGain(); vg.gain.value = 10;
+  vib.connect(vg); vg.connect(o.frequency); vib.start(t); vib.stop(t + 1.7);
+  const bp = AC.createBiquadFilter(); bp.type = 'bandpass';
+  bp.frequency.value = 580; bp.Q.value = 2.2;
+  const g = AC.createGain(); g.gain.value = 0.0001;
+  for (let k = 0; k < 4; k++) {                           // wah… wah… wah…
+    g.gain.setTargetAtTime(0.022 - k * 0.003, t + k * 0.3, 0.05);
+    g.gain.setTargetAtTime(0.0001, t + k * 0.3 + 0.16, 0.07);
+  }
+  o.connect(bp); bp.connect(g); route(g, 0.85);           // almost all reverb: far away
+  o.start(t); o.stop(t + 1.7);
+}
+
+function whisper() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const n = noiseSource();
+  const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 3;
+  bp.frequency.setValueAtTime(1300, t);
+  bp.frequency.linearRampToValueAtTime(2300, t + 0.4);
+  bp.frequency.linearRampToValueAtTime(1100, t + 0.85);
+  const trem = AC.createOscillator(); trem.frequency.value = 9 + Math.random() * 5;
+  const tremG = AC.createGain(); tremG.gain.value = 0.012;
+  const g = AC.createGain(); g.gain.value = 0.014;
+  trem.connect(tremG); tremG.connect(g.gain); trem.start(t); trem.stop(t + 0.9);
+  const pan = AC.createStereoPanner(); pan.pan.value = Math.random() * 1.6 - 0.8;
+  n.connect(bp); bp.connect(g); g.connect(pan); route(pan, 0.5);
+  n.start(t); n.stop(t + 0.95);
+  g.gain.setTargetAtTime(0.0001, t + 0.7, 0.08);
+}
+
+/* a slow knocking from somewhere that has no door */
+function knock() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const n = 2 + (Math.random() * 2 | 0);
+  for (let k = 0; k < n; k++) {
+    const tk = t + k * (0.42 + Math.random() * 0.12);
+    const o = AC.createOscillator();
+    o.frequency.setValueAtTime(68 + Math.random() * 14, tk);
+    o.frequency.exponentialRampToValueAtTime(42, tk + 0.09);
+    const g = AC.createGain();
+    g.gain.setValueAtTime(0.0001, tk);
+    g.gain.exponentialRampToValueAtTime(0.16, tk + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, tk + 0.22);
+    o.connect(g); route(g, 0.85);
+    o.start(tk); o.stop(tk + 0.25);
+  }
+}
+
+/* something dragging its nails inside the wall cavity */
+function scratchInWalls() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const pan = AC.createStereoPanner();
+  pan.pan.value = Math.random() < 0.5 ? -0.9 : 0.9;
+  route(pan, 0.4);
+  const n = 3 + (Math.random() * 3 | 0);
+  for (let k = 0; k < n; k++) {
+    const tk = t + k * (0.14 + Math.random() * 0.2);
+    const nz = noiseSource();
+    const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 6;
+    bp.frequency.setValueAtTime(2600 + Math.random() * 1400, tk);
+    bp.frequency.linearRampToValueAtTime(1800 + Math.random() * 800, tk + 0.12);
+    const g = AC.createGain();
+    g.gain.setValueAtTime(0.0001, tk);
+    g.gain.linearRampToValueAtTime(0.012 + Math.random() * 0.008, tk + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, tk + 0.16);
+    nz.connect(bp); bp.connect(g); g.connect(pan);
+    nz.start(tk); nz.stop(tk + 0.2);
+  }
+}
+
+/* footsteps. not yours. */
+function distantSteps() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const pan = AC.createStereoPanner();
+  pan.pan.value = Math.random() * 1.4 - 0.7;
+  route(pan, 0.9);
+  const n = 3 + (Math.random() * 3 | 0);
+  for (let k = 0; k < n; k++) {
+    const tk = t + k * (0.46 + Math.random() * 0.06);
+    const nz = noiseSource();
+    const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 140;
+    const g = AC.createGain();
+    g.gain.setValueAtTime(0.0001, tk);
+    g.gain.exponentialRampToValueAtTime(0.05, tk + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, tk + 0.1);
+    nz.connect(lp); lp.connect(g); g.connect(pan);
+    nz.start(tk); nz.stop(tk + 0.12);
+  }
+}
+
+/* a long exhale, very close, just behind your ear */
+function breathBehind() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const nz = noiseSource();
+  const bp = AC.createBiquadFilter(); bp.type = 'bandpass';
+  bp.frequency.setValueAtTime(900, t);
+  bp.frequency.linearRampToValueAtTime(500, t + 0.9);
+  bp.Q.value = 1.2;
+  const g = AC.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(0.02, t + 0.35);
+  g.gain.linearRampToValueAtTime(0.0001, t + 1.0);
+  const pan = AC.createStereoPanner();
+  pan.pan.value = Math.random() < 0.5 ? -0.85 : 0.85;
+  nz.connect(bp); bp.connect(g); g.connect(pan);
+  route(pan, 0.15);                                       // dry. close.
+  nz.start(t); nz.stop(t + 1.1);
+}
+
+/* an infant, crying, somewhere it cannot possibly be */
+function babyCry() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  for (let k = 0; k < 2; k++) {
+    const tk = t + k * 1.5;
+    const o = AC.createOscillator(); o.type = 'triangle';
+    o.frequency.setValueAtTime(430 + Math.random() * 40, tk);
+    o.frequency.linearRampToValueAtTime(620, tk + 0.5);
+    o.frequency.exponentialRampToValueAtTime(330, tk + 1.25);
+    const vib = AC.createOscillator(); vib.frequency.value = 7.5;
+    const vg = AC.createGain(); vg.gain.value = 22;
+    vib.connect(vg); vg.connect(o.frequency); vib.start(tk); vib.stop(tk + 1.3);
+    const bp = AC.createBiquadFilter(); bp.type = 'bandpass';
+    bp.frequency.value = 950; bp.Q.value = 1.6;
+    const g = AC.createGain();
+    g.gain.setValueAtTime(0.0001, tk);
+    g.gain.linearRampToValueAtTime(0.02, tk + 0.18);
+    g.gain.setTargetAtTime(0.008, tk + 0.7, 0.15);
+    g.gain.setTargetAtTime(0.0001, tk + 1.1, 0.12);
+    o.connect(bp); bp.connect(g); route(g, 0.92);         // nearly all reverb: far away
+    o.start(tk); o.stop(tk + 1.45);
+  }
+}
+
+/* five notes of a lullaby, hummed by no one */
+function lullaby() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const notes = [392, 440, 392, 330, 294];                // a falling line, minor-ish
+  notes.forEach((f, k) => {
+    const tk = t + k * 0.62;
+    const o = AC.createOscillator(); o.type = 'triangle';
+    o.frequency.value = f * 0.995;                        // slightly flat. wrong.
+    const bp = AC.createBiquadFilter(); bp.type = 'bandpass';
+    bp.frequency.value = 700; bp.Q.value = 1.1;
+    const g = AC.createGain();
+    g.gain.setValueAtTime(0.0001, tk);
+    g.gain.linearRampToValueAtTime(0.016, tk + 0.12);
+    g.gain.exponentialRampToValueAtTime(0.0001, tk + 0.58);
+    o.connect(bp); bp.connect(g); route(g, 0.95);
+    o.start(tk); o.stop(tk + 0.62);
+  });
+}
+
+function scareSting() {
+  if (!AC) return;
+  const t = AC.currentTime;
+  /* shrieking noise sweep */
+  const n = noiseSource();
+  const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.8;
+  bp.frequency.setValueAtTime(3200, t);
+  bp.frequency.exponentialRampToValueAtTime(260, t + 1.3);
+  const ng = AC.createGain();
+  ng.gain.setValueAtTime(0.85, t);
+  ng.gain.exponentialRampToValueAtTime(0.001, t + 1.4);
+  n.connect(bp); bp.connect(ng); route(ng, 0.5); n.start(t); n.stop(t + 1.5);
+  /* the scream — fast-wobbling saw through a vocal formant */
+  const sc = AC.createOscillator(); sc.type = 'sawtooth';
+  sc.frequency.setValueAtTime(520, t);
+  sc.frequency.linearRampToValueAtTime(880, t + 0.18);
+  sc.frequency.exponentialRampToValueAtTime(310, t + 1.0);
+  const fm = AC.createOscillator(); fm.frequency.value = 28;
+  const fmg = AC.createGain(); fmg.gain.value = 60;
+  fm.connect(fmg); fmg.connect(sc.frequency); fm.start(t); fm.stop(t + 1.1);
+  const form = AC.createBiquadFilter(); form.type = 'bandpass';
+  form.frequency.value = 950; form.Q.value = 1.4;
+  const sg = AC.createGain();
+  sg.gain.setValueAtTime(0.001, t);
+  sg.gain.exponentialRampToValueAtTime(0.34, t + 0.05);
+  sg.gain.exponentialRampToValueAtTime(0.001, t + 1.05);
+  sc.connect(form); form.connect(sg); route(sg, 0.55);
+  sc.start(t); sc.stop(t + 1.1);
+  /* dissonant cluster pitching down */
+  for (const f of [185, 233, 311, 466]) {
+    const o = AC.createOscillator(); o.type = 'sawtooth';
+    o.frequency.setValueAtTime(f * (1 + Math.random() * 0.04), t);
+    o.frequency.exponentialRampToValueAtTime(f * 0.45, t + 1.2);
+    const g = AC.createGain();
+    g.gain.setValueAtTime(0.13, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 1.25);
+    o.connect(g); route(g, 0.4); o.start(t); o.stop(t + 1.3);
+  }
+  /* sub punch */
+  const s = AC.createOscillator(); s.frequency.setValueAtTime(62, t);
+  s.frequency.exponentialRampToValueAtTime(26, t + 0.5);
+  const subg = AC.createGain();
+  subg.gain.setValueAtTime(0.95, t);
+  subg.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
+  s.connect(subg); route(subg, 0.15); s.start(t); s.stop(t + 0.65);
+}
+
+/* ============================ PLAYER / CONTROLS ============================ */
+
+let px = 0, pz = -0.6, yaw = 0, pitch = 0;
+let locked = false, bobPhase = 0, stepDist = 0;
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup',   e => { keys[e.code] = false; });
+
+const overlay = document.getElementById('overlay');
+const crosshair = document.getElementById('crosshair');
+overlay.addEventListener('click', () => {
+  initAudio();
+  renderer.domElement.requestPointerLock();
+});
+document.addEventListener('pointerlockchange', () => {
+  locked = document.pointerLockElement === renderer.domElement;
+  overlay.classList.toggle('hidden', locked);
+  crosshair.style.display = locked ? 'block' : 'none';
+});
+addEventListener('mousemove', e => {
+  if (!locked) return;
+  yaw   -= e.movementX * 0.0021;
+  pitch -= e.movementY * 0.0021;
+  pitch = Math.max(-1.45, Math.min(1.45, pitch));
+});
+
+const SPEED = 1.55;  // a reluctant walk. no sprint. on purpose.
+function updatePlayer(dt) {
+  const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
+  const r = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  let dx = -Math.sin(yaw) * f + Math.cos(yaw) * r;
+  let dz = -Math.cos(yaw) * f - Math.sin(yaw) * r;
+  const len = Math.hypot(dx, dz);
+  if (len > 0.001) {
+    dx = dx / len * SPEED * dt;
+    dz = dz / len * SPEED * dt;
+    if (!collides(px + dx, pz)) px += dx;
+    if (!collides(px, pz + dz)) pz += dz;
+    bobPhase += SPEED * dt * 5.2;
+    stepDist += Math.hypot(dx, dz);
+    if (stepDist > 0.72) { stepDist = 0; footstep(); }
+  }
+  px = Math.max(-16.0, Math.min(1.45, px));
+  pz = Math.max(-18.45, Math.min(-0.2, pz));
+}
+
+/* ============================ DOOR LOGIC ============================ */
+
+function updateDoor(dt, now) {
+  if (doorState === 'closed' && px < -7.5) {
+    doorState = 'opening';
+    doorTarget = -1.85;                 // swings open into the room (toward -x)
+    doorCreak();
+  }
+  if (doorState === 'slammed' && now > doorRearmAt) doorState = 'closed';
+  const diff = doorTarget - doorAngle;
+  if (Math.abs(diff) > 0.002) {
+    const rate = doorState === 'slamming' ? 14 : 0.55;
+    doorAngle += Math.sign(diff) * Math.min(Math.abs(diff), rate * dt);
+    doorHinge.rotation.y = doorAngle;
+    if (doorState === 'slamming' && Math.abs(doorTarget - doorAngle) < 0.01) {
+      doorState = 'slammed';
+      doorRearmAt = now + 6;
+    }
+  }
+  doorSolid.disabled = Math.abs(doorAngle) > 1.1;
+}
+
+/* ============================ LIGHTS / FLICKER ============================ */
+
+let dimFactor = 1, scareBlackout = false;
+function updateLights(now, dt) {
+  for (const L of lamps) {
+    if (now > L.nextPick) {
+      L.nextPick = now + 0.06 + Math.random() * 0.08;
+      L.target = L.base * (0.72 + Math.random() * 0.42);
+      if (L.fluoro) {                                    // nastier rapid fluorescent stutter
+        if (Math.random() < 0.03) L.dropUntil = now + 0.03 + Math.random() * 0.12;
+      } else if (Math.random() < 0.006) {
+        L.dropUntil = now + 0.05 + Math.random() * 0.3;
+      }
+    }
+    let tgt = (now < L.dropUntil) ? L.base * 0.04 : L.target;
+    if (scareBlackout) tgt = 0;
+    L.cur += (tgt - L.cur) * Math.min(1, dt * 22);
+    L.light.intensity = L.cur * dimFactor;
+    const emisBase = L.fluoro ? L.fluoroEmis : 2.2;
+    L.bulbMat.emissiveIntensity = (L.cur / L.base) * emisBase * dimFactor;
+    if (L.swing) L.group.rotation.z = Math.sin(now * 0.9) * L.swing;
+  }
+}
+
+/* ============================ THE TEASE ============================
+   First time you get halfway down the hall: the far lamp browns out and
+   she is simply there, in front of the door. Then she isn't.            */
+
+let teaseState = 'armed', teaseT = 0;
+const teaseZ = -15.25;
+function updateTease(dt, now) {
+  if (teaseState === 'armed' && pz < -14.2 && lisaActions.idle) {
+    teaseState = 'running'; teaseT = 0;
+    lisa.position.set(-8.9, 0, teaseZ);
+    lisa.lookAt(px, 0, pz);
+    lisa.visible = true;
+    playLisa('idle');
+    /* kill the sconce but leave the fluorescent stuttering —
+       she is only ever glimpsed in the flashes */
+    sconceB.dropUntil = now + 0.9;
+    lampFluoro.dropUntil = now + 0.12;
+    subThump(); whisper();
+  }
+  if (teaseState !== 'running') return;
+  teaseT += dt;
+  /* jitter perpendicular to the view down leg B — along z */
+  lisa.position.z = teaseZ + Math.sin(teaseT * 31) * 0.012;   // barely-there shudder
+  if (teaseT > 0.7 && teaseT < 0.85) lampFluoro.dropUntil = now + 0.3;  // one long blink…
+  if (teaseT > 0.85) {
+    lisa.visible = false;                                               // …and she's gone
+    teaseState = 'done';
+  }
+}
+
+/* ============================ THE SCARE ============================ */
+
+let scareState = 'armed';   // armed -> running -> corner -> done
+let scareT = 0, shakeAmp = 0, freezeScare = false, twitchAt = 0;
+const spawnPos = new THREE.Vector3();
+
+function triggerScare() {
+  scareState = 'running';
+  scareT = 0;
+  scareSting();
+  playLisa('scream', 0.03);
+  const fx = px - Math.sin(yaw) * 2.3;
+  const fz = pz - Math.cos(yaw) * 2.3;
+  spawnPos.set(
+    Math.max(-15.7, Math.min(-10.6, fx)), 0,
+    Math.max(-18.0, Math.min(-12.8, fz)));
+}
+
+function updateScare(dt, now) {
+  if (scareState === 'armed' && px < -11.5) triggerScare();
+
+  if (scareState === 'corner') {                          // she waits, facing the wall
+    lisa.scale.y = 1 + Math.sin(now * 1.7) * 0.004;       // breathing
+    if (Math.hypot(px - lisa.position.x, pz - lisa.position.z) < 1.35) {
+      lisa.visible = false;
+      scareLight.intensity = 0;
+      scareState = 'done';
+      whisper(); subThump();
+    }
+    return;
+  }
+  if (scareState !== 'running') return;
+
+  scareT += dt;
+  if (freezeScare && scareT > 0.5) scareT = 0.5;
+  if (scareT < 0.12) {                                    // lights cut
+    scareBlackout = true;
+    lisa.visible = false;
+  } else if (scareT < 0.95) {                             // she is here
+    scareBlackout = false;
+    lisa.visible = true;
+    scareLight.intensity = 3.5 + Math.random() * 2.5;
+    const k = (scareT - 0.12) / 0.83;
+    const tx = px - Math.sin(yaw) * 0.85;
+    const tz = pz - Math.cos(yaw) * 0.85;
+    /* jerky, sticking lunge: quantize the approach into snaps */
+    const kq = Math.min(1, Math.floor(k * 7) / 7 + (k * k) * 0.25);
+    lisa.position.set(
+      spawnPos.x + (tx - spawnPos.x) * kq + (Math.random() - 0.5) * 0.05,
+      (Math.random() - 0.5) * 0.04,
+      spawnPos.z + (tz - spawnPos.z) * kq + (Math.random() - 0.5) * 0.05);
+    lisa.lookAt(px, 0, pz);
+    shakeAmp = 0.035;                                     // the scream clip does the reaching
+  } else if (scareT < 1.55) {                             // blackout again
+    scareBlackout = true;
+    lisa.visible = false;
+    scareLight.intensity = 0;
+    shakeAmp = 0.01;
+  } else {                                                // aftermath
+    scareState = 'corner';
+    scareBlackout = false;
+    shakeAmp = 0;
+    dimFactor = 0.62;
+    scareLight.color.set(0x97a5c0);                       // faint cold spill so you can
+    scareLight.intensity = 0.55;                          // *just* make her out
+
+    wallText.visible = true;
+    doorState = 'slamming';
+    doorTarget = -0.08;
+    doorSolid.disabled = false;
+    doorSlam();
+    /* she didn't leave. she's in the corner, facing the wall. */
+    playLisa('idle', 0.4);
+    lisa.position.set(-15.5, 0, -17.8);
+    lisa.lookAt(-16.6, 0, -18.9);
+    lisa.visible = true;
+  }
+}
+
+/* ============================ AMBIENT AUDIO CUES ============================ */
+
+let nextCreakAt = 6, nextSobAt = 9, nextAmbientAt = 18;
+function updateAudioCues(now) {
+  if (!AC) return;
+  if (now > nextCreakAt) {
+    houseCreak();
+    nextCreakAt = now + 7 + Math.random() * 14;
+  }
+  /* the house has other noises */
+  if (now > nextAmbientAt) {
+    const r = Math.random();
+    if (r < 0.2) knock();
+    else if (r < 0.4) scratchInWalls();
+    else if (r < 0.58) distantSteps();
+    else if (r < 0.72) breathBehind();
+    else if (r < 0.88 && scareState === 'armed') babyCry();
+    else lullaby();
+    nextAmbientAt = now + 14 + Math.random() * 22;
+  }
+  /* the radio only speaks to those who lean in */
+  if (murGain) {
+    const d = Math.hypot(px - 1.05, pz - (-10.1));
+    murGain.gain.setTargetAtTime(
+      Math.max(0, 1 - d / 2.2) * 0.011, AC.currentTime, 0.3);
+  }
+  /* sobbing from beyond the door, while still down leg A */
+  if (scareState === 'armed' && now > nextSobAt && pz < -2.5 && pz > -13) {
+    sob();
+    nextSobAt = now + 13 + Math.random() * 18;
+  }
+  if (riserGain) {
+    const a = scareState === 'armed'
+      ? Math.max(0, Math.min(1, (-px - 6.5) / 3.0)) * 0.075 : 0;
+    riserGain.gain.setTargetAtTime(a, AC.currentTime, 0.2);
+  }
+  if (scareState === 'armed' && px < -7.0) {
+    const depth = Math.max(0, Math.min(1, (-px - 7.0) / 3.5));
+    const interval = 0.62 - depth * 0.24;
+    if (AC.currentTime > nextBeat) {
+      heartThump(beatHeavy);
+      beatHeavy = !beatHeavy;
+      nextBeat = AC.currentTime + (beatHeavy ? interval : interval * 0.55);
+    }
+  }
+  /* fluorescent hum swells as you near the dark door */
+  if (humGain) {
+    const dist = Math.hypot(px - (-9.5), pz - (-15.25));
+    let amp = Math.max(0, Math.min(1, 1 - dist / 6)) * 0.035;
+    if (scareState === 'corner' || scareState === 'done') amp *= 0.5;
+    humGain.gain.setTargetAtTime(amp, AC.currentTime, 0.2);
+  }
+}
+
+/* ============================ MAIN LOOP ============================ */
+
+/* hidden debug hook — open the console and try __pt.scare() */
+window.__pt = {
+  warp: (x, z) => { px = x; pz = z; },
+  look: (y, p = 0) => { yaw = y; pitch = p; },
+  scare: () => { if (scareState === 'armed') triggerScare(); },
+  freeze: v => { freezeScare = v; },
+  showLisa: (d = 2.2) => {
+    lisa.position.set(px - Math.sin(yaw) * d, 0, pz - Math.cos(yaw) * d);
+    lisa.lookAt(px, 0, pz);
+    lisa.visible = true;
+  },
+  hideLisa: () => { lisa.visible = false; },
+  step: (dt = 1 / 60, n = 1) => { for (let i = 0; i < n; i++) tick(dt); },
+  scene, camera, lisa, wallText,
+};
+
+let simTime = 0, lastMs = performance.now();
+function animate() {
+  requestAnimationFrame(animate);
+  const nowMs = performance.now();
+  tick(Math.min((nowMs - lastMs) / 1000, 0.05));
+  lastMs = nowMs;
+}
+function tick(dt) {
+  simTime += dt;
+  const now = simTime;
+
+  if (locked) updatePlayer(dt);
+  updateDoor(dt, now);
+  updateLights(now, dt);
+  updateTease(dt, now);
+  updateScare(dt, now);
+  if (lisaMixer && lisa.visible) lisaMixer.update(dt);
+  updateAudioCues(now);
+
+  const bob = Math.sin(bobPhase) * 0.028;
+  camera.position.set(
+    px + (Math.random() - 0.5) * shakeAmp,
+    1.62 + bob + Math.sin(now * 0.55) * 0.008 + (Math.random() - 0.5) * shakeAmp,
+    pz + (Math.random() - 0.5) * shakeAmp);
+  camera.rotation.x = pitch;
+  camera.rotation.y = yaw;
+  camera.rotation.z = Math.sin(bobPhase * 0.5) * 0.004 + (Math.random() - 0.5) * shakeAmp * 0.5;
+
+  grimePass.uniforms.time.value = now;
+  composer.render();
+}
+animate();
+</script>
+</body>
+</html>

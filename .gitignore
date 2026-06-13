@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# local working backups
+index.backup-*.html
+
+# Vendored Three.js: keep ONLY the parts the app imports
+# (build/ + examples/jsm/), ignore the ~426MB of unused demo assets.
+/three-js/*
+!/three-js/build/
+!/three-js/examples/
+/three-js/examples/*
+!/three-js/examples/jsm/
